@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<title>Fo Squad Sandbox</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">Fo</div>
+    <div class="brand-text">
+      <div class="eyebrow">Fo Squad sandbox</div>
+      <h1 id="scenario">Waiting for a run</h1>
+    </div>
+  </div>
+
+  <div class="clock-block">
+    <div class="eyebrow">Simulated time</div>
+    <div class="clock" id="clock">--</div>
+  </div>
+
+  <ol class="stages" id="stages" aria-label="Event stage">
+    <li data-stage="planning"><span class="step">1</span><span class="step-label">Planning</span></li>
+    <li data-stage="voting"><span class="step">2</span><span class="step-label">Voting</span></li>
+    <li data-stage="booked"><span class="step">3</span><span class="step-label">Booked</span></li>
+    <li data-stage="claiming"><span class="step">4</span><span class="step-label">Claiming</span></li>
+    <li data-stage="paying"><span class="step">5</span><span class="step-label">Paying</span></li>
+    <li data-stage="settled"><span class="step">6</span><span class="step-label">Settled</span></li>
+  </ol>
+
+  <div class="run-meta">
+    <span class="badge badge-waiting" id="status" role="status">Waiting</span>
+  </div>
+</header>
+
+<div class="controls" role="toolbar" aria-label="Playback controls">
+  <label class="switch" id="follow-wrap">
+    <input type="checkbox" id="follow" checked>
+    <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+    <span>Follow live</span>
+  </label>
+
+  <div class="control-group">
+    <button type="button" class="btn icon" id="step-back" aria-label="Step back one event" title="Step back">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3v10M13 3 6 8l7 5z"/></svg>
+    </button>
+    <button type="button" class="btn primary" id="play">
+      <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-play"><path d="M5 3l8 5-8 5z"/></svg>
+      <svg viewBox="0 0 16 16" aria-hidden="true" class="icon-pause"><path d="M5 3v10M11 3v10"/></svg>
+      <span id="play-label">Replay</span>
+    </button>
+    <button type="button" class="btn icon" id="step-forward" aria-label="Step forward one event" title="Step forward">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12 3v10M3 3l7 5-7 5z"/></svg>
+    </button>
+  </div>
+
+  <label class="speed">
+    <span>Speed</span>
+    <select id="speed">
+      <option value="0.5">0.5x</option>
+      <option value="1" selected>1x</option>
+      <option value="2">2x</option>
+      <option value="4">4x</option>
+      <option value="10">10x</option>
+    </select>
+  </label>
+
+  <input type="range" id="scrub" min="0" max="0" value="0" step="1" aria-label="Timeline position">
+  <span class="position" id="position">0 / 0</span>
+
+  <button type="button" class="chip" id="pending" hidden>0 new</button>
+  <span class="conn" id="conn"></span>
+  <span class="cost" id="cost" hidden></span>
+
+  <button type="button" class="btn" id="toggle-side" aria-pressed="true" aria-controls="side">Behind the scenes</button>
+</div>
+
+<main class="layout" id="layout">
+  <section class="stage-area" aria-label="Phones">
+    <div class="phones" id="phones">
+      <div class="empty" id="empty">
+        <p class="empty-title">No run yet</p>
+        <p>Start a sandbox run and its texts will appear here.</p>
+      </div>
+    </div>
+
+    <section class="split" id="split" hidden aria-labelledby="split-title">
+      <div class="split-head">
+        <h2 id="split-title">The split</h2>
+        <span class="split-summary" id="split-summary"></span>
+        <button type="button" class="btn small" id="split-toggle" aria-expanded="true" aria-controls="split-scroll">Hide</button>
+      </div>
+      <div class="split-scroll" id="split-scroll">
+        <table class="split-table">
+          <thead>
+            <tr>
+              <th scope="col">Person</th>
+              <th scope="col">Items</th>
+              <th scope="col" class="num">Subtotal</th>
+              <th scope="col" class="num">Tax and tip</th>
+              <th scope="col" class="num">Total</th>
+              <th scope="col">Status</th>
+            </tr>
+          </thead>
+          <tbody id="split-body"></tbody>
+          <tfoot id="split-foot"></tfoot>
+        </table>
+      </div>
+    </section>
+  </section>
+
+  <aside class="side" id="side" aria-labelledby="side-title">
+    <div class="side-head">
+      <h2 id="side-title">Behind the scenes</h2>
+      <fieldset class="filters" id="filters">
+        <legend class="visually-hidden">Show in log</legend>
+      </fieldset>
+    </div>
+    <ol class="log" id="log" aria-live="off"></ol>
+  </aside>
+</main>
+
+<script src="app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,305 @@
+// The single definition of every Fo Squad tool: name, description, input
+// shape and which service method runs it. src/server.ts registers these with
+// MCP and src/runner/actions.ts hands them to the headless brain, so the two
+// can never drift apart. Descriptions are what the caller reads to decide when
+// to call a tool, so they say when and what comes back.
+
+import { z } from "zod";
+import { isFoError } from "./events/index.js";
+import type { FoSquadService, ToolResult } from "./service.js";
+
+export interface ToolDef {
+  name: string;
+  title: string;
+  description: string;
+  /** Zod raw shape of the arguments (what MCP's registerTool takes). */
+  inputShape: z.ZodRawShape;
+  /** Runs the service call. `args` must already be validated against inputShape. */
+  run(service: FoSquadService, args: Record<string, unknown>): Promise<ToolResult>;
+}
+
+// Keeps each run() typed against its own shape, then erases to ToolDef for the list.
+function defineTool<S extends z.ZodRawShape>(def: {
+  name: string;
+  title: string;
+  description: string;
+  inputShape: S;
+  run: (service: FoSquadService, args: z.output<z.ZodObject<S>>) => Promise<ToolResult>;
+}): ToolDef {
+  return def as unknown as ToolDef;
+}
+
+const money = z.union([z.string(), z.number()]);
+const eventId = z.string().min(1).describe("The dinner's event_id from create_event or get_status.");
+const person = (what = "The person") =>
+  z.string().min(1).describe(`${what}: person id ("maya"), name ("Maya") or phone number.`);
+const byPhone = (what: string) =>
+  z.string().min(1).describe(`Phone number the request came from. ${what}`);
+const slot = z.object({
+  label: z.string().describe('What friends see, e.g. "Sat 7:30pm".'),
+  starts_at: z.string().describe("ISO 8601 start time, e.g. 2026-10-24T19:30:00-07:00."),
+});
+const friend = z.object({ name: z.string(), phone: z.string() });
+const organizerPick = z.object({
+  restaurant_name: z.string(),
+  firmness: z.enum(["locked", "suggested"]).describe('"locked" = set, only collect times; "suggested" = default, open to pushback.'),
+});
+const force = z.boolean().optional().describe("Decide now with whoever answered, without waiting for everyone or the deadline.");
+
+export const TOOLS: readonly ToolDef[] = [
+  defineTool({
+    name: "create_event",
+    title: "Create a dinner",
+    description:
+      "Call when the organizer asks to plan a dinner, or sends a receipt with no active dinner (omit time_slots for a split-only night). Returns event_id, people with ids and phones, and time slots A, B, C...; confirm the list with the organizer before texting anyone.",
+    inputShape: {
+      title: z.string().min(1).describe('Short name used in every message, e.g. "Saturday dinner".'),
+      organizer: z.object({
+        name: z.string(),
+        phone: z.string(),
+        venmo: z.string().optional().describe("Organizer's Venmo username, used for pay links."),
+      }),
+      friends: z.array(friend).min(1),
+      time_slots: z.array(slot).optional().describe("3 or 4 options; ids are assigned A, B, C... Omit for a split-only night."),
+      budget_per_person: money.optional().describe('Dollars, e.g. "50".'),
+      cuisine_hint: z.string().optional(),
+      reply_deadline: z.string().optional().describe("ISO time. Defaults to 2 hours from now."),
+      organizer_pick: organizerPick.optional(),
+    },
+    run: (service, args) => service.createEvent(args),
+  }),
+  defineTool({
+    name: "update_event",
+    title: "Organizer edits",
+    description:
+      "Organizer-only edits: new time_slots after pick_time finds no overlap (clears slot answers and reopens planning), fix a phone number, add or remove friends, change the pick, Venmo handle or deadline. Returns what changed plus the updated people and slots.",
+    inputShape: {
+      event_id: eventId,
+      by_phone: byPhone("Must be the organizer's number."),
+      time_slots: z.array(slot).optional().describe("Replaces every time option."),
+      organizer_pick: organizerPick.optional(),
+      organizer_venmo: z.string().optional(),
+      reply_deadline: z.string().optional().describe("ISO time in the future."),
+      fix_phone: z.object({ person: z.string(), phone: z.string() }).optional(),
+      add_friends: z.array(friend).optional(),
+      remove_friends: z.array(z.string()).optional().describe("People to remove (id, name or phone)."),
+    },
+    run: (service, args) => service.updateEvent(args),
+  }),
+  defineTool({
+    name: "record_preferences",
+    title: "Save a round 1 answer",
+    description:
+      "Call for each friend's reply to the times and food question. Latest reply wins until the deadline; after that it returns PLAN_LOCKED, so tell them the plan is set. Returns what was saved and who is still pending.",
+    inputShape: {
+      event_id: eventId,
+      person: person(),
+      slot_ids: z.array(z.string()).describe('Letters they can make, e.g. ["B", "C"]. Empty if none work.'),
+      any_time: z.boolean().optional().describe('"Any time works".'),
+      cuisines: z.array(z.string()).optional(),
+      avoid_cuisines: z.array(z.string()).optional(),
+      dietary: z.array(z.string()).optional().describe('Hard needs, e.g. ["vegetarian", "nut allergy"].'),
+      budget: money.optional().describe("Private per-person budget in dollars. Never shared."),
+      plus_ones: z.number().int().min(0).optional(),
+    },
+    run: (service, args) => service.recordPreferences(args),
+  }),
+  defineTool({
+    name: "mark_nudged",
+    title: "Record a nudge",
+    description:
+      "Call right after nudging a quiet friend during Planning or Voting, so nobody gets nudged twice. Returns everyone nudged so far.",
+    inputShape: { event_id: eventId, person: person() },
+    run: (service, args) => service.markNudged(args),
+  }),
+  defineTool({
+    name: "pick_time",
+    title: "Pick the time",
+    description:
+      "Call when everyone answered, or at the deadline (force: true to decide early). Returns the slot, who can and can't make it, party_size, the winning cuisine, hard_constraints every restaurant must meet, and any fairness_note; status no_overlap means ask the organizer for new times via update_event.",
+    inputShape: { event_id: eventId, force },
+    run: (service, args) => service.pickTime(args),
+  }),
+  defineTool({
+    name: "set_restaurant_options",
+    title: "Open the restaurant vote",
+    description:
+      "Call after pick_time with the shortlist (usually three restaurants with a table at the chosen time). Saves them as options 1, 2, 3 and opens voting; options that break a hard constraint come back under rejected and are left off the ballot.",
+    inputShape: {
+      event_id: eventId,
+      options: z
+        .array(
+          z.object({
+            name: z.string(),
+            cuisine: z.string().optional(),
+            price_per_person: money.optional().describe("Estimated dollars per person."),
+            notes: z.string().optional(),
+          }),
+        )
+        .min(1),
+    },
+    run: (service, args) => service.setRestaurantOptions(args),
+  }),
+  defineTool({
+    name: "record_vote",
+    title: "Save a vote",
+    description:
+      "Call for each restaurant vote reply. Latest vote wins. Returns the vote and who hasn't voted yet.",
+    inputShape: {
+      event_id: eventId,
+      person: person("The voter"),
+      option: z.string().min(1).describe('Option number ("1") or restaurant name.'),
+    },
+    run: (service, args) => service.recordVote(args),
+  }),
+  defineTool({
+    name: "tally_votes",
+    title: "Count the votes",
+    description:
+      "Call when everyone voted, or with force: true to decide with the votes in. Returns the winner, reason (\"Luigi's won 4 to 2\"), ranked runner_ups to try if the winner is full, party_size and any fairness_note; ties go to the organizer.",
+    inputShape: { event_id: eventId, force },
+    run: (service, args) => service.tallyVotes(args),
+  }),
+  defineTool({
+    name: "confirm_booking",
+    title: "Confirm the booking",
+    description:
+      "Call only after the organizer says yes and the table is booked; by_phone must be the organizer's number. Records the restaurant, slot, party size, deposit and auto gratuity (used by the split) and moves the dinner to Booked.",
+    inputShape: {
+      event_id: eventId,
+      by_phone: byPhone("Must be the organizer's number."),
+      restaurant_name: z.string().min(1),
+      slot_id: z.string().optional().describe("Defaults to the slot pick_time chose."),
+      party_size: z.number().int().min(1).optional().describe("Defaults to the party size pick_time computed."),
+      confirmation: z.string().optional(),
+      deposit: money.optional().describe("Deposit the organizer paid, in dollars."),
+      auto_gratuity: z.boolean().optional().describe("Restaurant adds gratuity automatically (large party)."),
+      notes: z.string().optional().describe("Cancellation policy and anything else worth remembering."),
+    },
+    run: (service, args) => service.confirmBooking(args),
+  }),
+  defineTool({
+    name: "add_receipt",
+    title: "Add a receipt",
+    description:
+      "Call with every line item from the receipt photo, before texting any friend. Checks items sum to the subtotal and the parts sum to the total; on a mismatch nothing is saved and the error says by how much. Returns numbered items, the item_list to send friends and any warnings; call once per receipt.",
+    inputShape: {
+      event_id: eventId,
+      items: z
+        .array(z.object({ description: z.string(), amount: money.describe("Line total in dollars; negative for comps.") }))
+        .min(1),
+      subtotal: money,
+      tax: money,
+      tip: money,
+      fees: money.optional(),
+      discount: money.optional().describe("Positive dollars off the bill. Never put a deposit credit here."),
+      total: money.describe("Printed total, after any deposit credit."),
+      tip_included: z.boolean().optional().describe("Service charge or gratuity already printed on the receipt."),
+      deposit_credit: money.optional().describe("Deposit credit printed on the receipt, in dollars."),
+    },
+    run: (service, args) => service.addReceipt(args),
+  }),
+  defineTool({
+    name: "set_attendees",
+    title: "Set who came",
+    description:
+      "Call after the organizer confirms who actually came, including the organizer if they ate. Only attendees can claim items. Returns attendees and the numbered item list.",
+    inputShape: {
+      event_id: eventId,
+      people: z.array(z.string()).min(1).describe("Everyone who came (ids, names or phones)."),
+    },
+    run: (service, args) => service.setAttendees(args),
+  }),
+  defineTool({
+    name: "record_claims",
+    title: "Save what someone had",
+    description:
+      'Call for each attendee\'s item reply, as claim "Maya: 1, 4" ("Maya: 1, 4x2" for a double portion, "Maya: none" if nothing) or person plus items. Replaces that person\'s claims; in Paying it reopens claiming for a dispute. Returns unclaimed items, shared items to flag and who hasn\'t answered.',
+    inputShape: {
+      event_id: eventId,
+      claim: z.string().optional().describe('Fixed format "Name: 1, 4".'),
+      person: person("Who had the items").optional(),
+      items: z
+        .array(z.object({ number: z.number().int().min(1), weight: z.number().int().min(1).optional() }))
+        .optional(),
+    },
+    run: (service, args) => service.recordClaims(args),
+  }),
+  defineTool({
+    name: "calculate_shares",
+    title: "Run the split",
+    description:
+      "Call when everyone answered, and again after a dispute. Returns each share, a summary for the organizer and a ready-to-send private message with Venmo link per friend. Sends nothing: show the organizer the summary and text friends only after they say yes.",
+    inputShape: {
+      event_id: eventId,
+      by_phone: byPhone("Required (organizer's number) when using split_evenly or treated.").optional(),
+      unclaimed_policy: z.enum(["block", "split_evenly"]).optional(),
+      treated: z.array(z.string()).optional().describe("People being treated (birthday); their share moves onto everyone else."),
+      fees_split_evenly: z.boolean().optional().describe("Split fees evenly instead of by subtotal."),
+    },
+    run: (service, args) => service.calculateShares(args),
+  }),
+  defineTool({
+    name: "mark_paid",
+    title: "Mark a payment",
+    description:
+      "Call when a friend says they paid (by_phone = their phone, records says_paid) or the organizer confirms (by_phone = organizer, records paid). Anyone else is refused. Settles the dinner once everyone is paid.",
+    inputShape: {
+      event_id: eventId,
+      person: person("Who paid"),
+      by_phone: byPhone("The friend's own number or the organizer's."),
+    },
+    run: (service, args) => service.markPaid(args),
+  }),
+  defineTool({
+    name: "record_opt_out",
+    title: "Friend replied STOP",
+    description:
+      "Call when a friend replies STOP. Never text them again. Returns a message to pass to the organizer.",
+    inputShape: { event_id: eventId, person: person() },
+    run: (service, args) => service.recordOptOut(args),
+  }),
+  defineTool({
+    name: "get_status",
+    title: "Where things stand",
+    description:
+      "Call whenever unsure what to do. With event_id, or with the phone of whoever texted you to find their active dinner. Returns the stage, who is pending and next_action; found: false means no active dinner for that number.",
+    inputShape: {
+      event_id: z.string().optional(),
+      phone: z.string().optional(),
+    },
+    run: (service, args) => service.getStatus(args),
+  }),];
+
+export const TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
+
+export function getTool(name: string): ToolDef | undefined {
+  return TOOLS.find((t) => t.name === name);
+}
+
+export interface ServiceCallOutcome {
+  result: ToolResult;
+  isError: boolean;
+}
+
+/** Runs a service call and maps errors: FoError messages are safe to relay, anything else is not. */
+export async function runServiceCall(name: string, fn: () => Promise<ToolResult>): Promise<ServiceCallOutcome> {
+  try {
+    return { result: await fn(), isError: false };
+  } catch (err) {
+    if (isFoError(err)) {
+      return { result: { ok: false, error: { code: err.code, message: err.message } }, isError: true };
+    }
+    console.error(`[fo-squad] ${name} failed:`, err);
+    return {
+      result: {
+        ok: false,
+        error: {
+          code: "INTERNAL",
+          message: "Something went wrong on the Fo Squad server. Nothing was changed by this call; try again in a moment or tell the organizer.",
+        },
+      },
+      isError: true,
+    };
+  }
+}

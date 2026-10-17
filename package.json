@@ -1,0 +1,35 @@
+{
+  "name": "fo-squad",
+  "version": "0.1.0",
+  "description": "MCP server for Fo Squad: fair group dinner planning and exact bill splitting",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "fo:login": "tsx src/runner/fo/login.ts",
+    "sandbox": "tsx src/sandbox/cli.ts",
+    "sandbox:demo": "tsx src/sandbox/demo.ts",
+    "sandbox:edge": "tsx src/sandbox/edge/cli.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "express": "^5.3.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
