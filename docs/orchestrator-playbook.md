@@ -93,7 +93,7 @@ Each stage follows [standing-instructions.md](standing-instructions.md) for word
 3. One batched `ask_fo` with every availability text.
 4. Collect replies → `record_preferences`. The deadline defaults to 2 hours.
 5. About 30 minutes before the deadline, one batched nudge to everyone still pending, then `mark_nudged` for each. One nudge only.
-6. Everyone answered → `pick_time`. At the deadline → `pick_time` with `force: true`.
+6. Everyone answered → `pick_time`. At the deadline → `pick_time` with `force: true`. `check_shift` → send each `ask_to_shift` question privately, record the answers, and call `pick_time` again (or at `shift_deadline`).
 7. `NO_OVERLAP` → ask the organizer for new options, `update_event` with the new `time_slots`, re-ask everyone.
 8. One batched `ask_fo` with a kind private note to each person who can't make the chosen time. Say any `fairness_note` out loud.
 9. Locked pick → skip to booking. Otherwise ask Fo to find three restaurants that match the winning cuisine, meet **every** hard constraint `pick_time` returned, and have a table at that time. Don't let Fo book yet. Then `set_restaurant_options`.
@@ -120,7 +120,7 @@ Each stage follows [standing-instructions.md](standing-instructions.md) for word
 3. Confirm attendees with the tool's item count and total ("Got it: 9 items, $142.80 total. Did all 6 make it?"), then `set_attendees` including the organizer.
 4. One batched `ask_fo` sending each attendee the full numbered list. The organizer can claim right here in chat.
 5. Collect → `record_claims` (only from attendees, always a person's full list). Follow up on what it returns: one nudge to non-responders, tell the organizer about shared items, ask once about unclaimed items, then the organizer assigns them or chooses `unclaimed_policy: "split_evenly"`. `treated` and `fees_split_evenly` only on the organizer's word.
-6. `calculate_shares` and show the organizer every total: "4 of 4 answered. Totals: Maya $26.88, Jordan $47.36... Send?"
+6. `calculate_shares` and show the organizer every total: "4 of 4 claimed. Totals: Maya $26.88, Jordan $47.36... Send?"
 
 ### Paying
 

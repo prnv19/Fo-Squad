@@ -89,7 +89,7 @@ The full contract, with every argument, is in [docs/tool-contract.md](docs/tool-
 | `update_event` | Planning, Voting, Booked | Organizer-only edits: new time options after no overlap, fix a number, add or remove friends |
 | `record_preferences` | Planning | Saves one person's available slots, cuisines, dietary needs, private budget and plus-ones |
 | `mark_nudged` | Planning, Voting | Records that Fo nudged someone once |
-| `pick_time` | Planning | Applies the time rules. Returns the slot, who can't make it, `party_size`, the winning cuisine, the hard constraints and any `fairness_note` |
+| `pick_time` | Planning | Applies the time rules. If the best time leaves someone out, first asks them privately (`check_shift`) before locking. Returns the slot, who can't make it, `party_size`, the winning cuisine, the hard constraints and any `fairness_note` |
 | `set_restaurant_options` | Planning → Voting | Saves the shortlist (1, 2, 3) and opens voting |
 | `record_vote` | Voting | Saves one person's vote |
 | `tally_votes` | Voting | Returns the winner, counts, ranked runner ups and any `fairness_note` |
@@ -97,7 +97,7 @@ The full contract, with every argument, is in [docs/tool-contract.md](docs/tool-
 | `add_receipt` | → Claiming | Saves line items and validates that they add up. A printed deposit credit goes in `deposit_credit` and is counted exactly once |
 | `set_attendees` | Claiming | Records who actually came |
 | `record_claims` | Claiming, Paying | Saves what one person had, in the format `Maya: 1, 4` (or `Maya: none`) |
-| `calculate_shares` | → Paying | Runs the split and builds each Venmo link and private message. `treated` and `split_evenly` need the organizer's `by_phone` or `by_email` |
+| `calculate_shares` | → Paying | Runs the split once everyone has claimed (`CLAIMS_PENDING` until then) and builds each Venmo link and private message. `treated` and `split_evenly` need the organizer's `by_phone` or `by_email` |
 | `cover_bill` | Booked, Claiming → Settled | The organizer's treat: asked after dinner whether to split, they cover it. Closes the dinner with no split or payment requests |
 | `mark_paid` | Paying → Settled | `paid` from the organizer's phone or email, `says_paid` from the friend's own |
 | `record_opt_out` | All | Friend replied STOP |

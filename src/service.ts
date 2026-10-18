@@ -21,6 +21,7 @@ import {
   primaryContact,
   requirePerson,
   resolvePerson,
+  shiftWaiting,
   slugId,
   transition,
   updateEvent,
@@ -68,6 +69,7 @@ import type {
   Preferences,
   Receipt,
   RestaurantOption,
+  ShiftCheck,
   SplitError,
   TimeSlot,
 } from "./types.js";
@@ -107,6 +109,8 @@ export interface CreateEventArgs {
   cuisine_hint?: string;
   reply_deadline?: string;
   organizer_pick?: OrganizerPickArg;
+  /** A receipt (no time_slots) from a different meal than the organizer's open dinner. */
+  separate_dinner?: boolean;
 }
 
 export interface UpdateEventArgs extends SenderArgs {
@@ -141,6 +145,11 @@ export interface PersonArgs {
 export interface ForceArgs {
   event_id: string;
   force?: boolean;
+}
+
+export interface PickTimeArgs extends ForceArgs {
+  /** The organizer said to decide now, without asking whoever would miss out. */
+  skip_shift_check?: boolean;
 }
 
 export interface SetRestaurantOptionsArgs {
@@ -215,6 +224,8 @@ export interface GetStatusArgs {
 // ---------- Small pure helpers ----------
 
 const MAX_SLOTS = 26;
+/** How long the people asked to shift get to answer before pick_time decides anyway. */
+const SHIFT_WINDOW_MS = 30 * 60 * 1000;
 
 function invalid(message: string): FoError {
   return new FoError("INVALID_INPUT", message);
@@ -374,6 +385,21 @@ function partySizeFor(event: DinnerEvent, slotId: string, nowIso: string): numbe
   return withOrganizer(event, timePrefs(event), nowIso)
     .filter((p) => canAttend(p, slotId))
     .reduce((sum, p) => sum + 1 + Math.max(0, p.plusOnes || 0), 0);
+}
+
+/**
+ * Friends who'd miss out at the best slots (every slot tied for the most free),
+ * with the ones they'd miss, so each can be asked privately if one could work.
+ */
+function shiftAsks(event: DinnerEvent, time: PickTimeResult, prefs: Preferences[]): ShiftCheck["asks"] {
+  const most = time.ranking[0]?.count ?? 0;
+  const top = time.ranking.filter((r) => r.count === most).map((r) => r.slotId);
+  return event.people.flatMap((person) => {
+    if (person.id === event.organizerId) return [];
+    const pref = prefs.find((p) => p.personId === person.id);
+    const missed = pref ? top.filter((s) => !canAttend(pref, s)) : [];
+    return missed.length ? [{ personId: person.id, slotIds: missed }] : [];
+  });
 }
 
 /** Mirrors getStatus: people with no current answer might still come, so they can vote. */
@@ -560,6 +586,22 @@ export class FoSquadService {
     );
     if (duplicate) return this.createdResult(duplicate, true);
 
+    // A receipt mid-plan belongs to the dinner being planned, not a new one.
+    if (draft.timeSlots.length === 0 && !args.separate_dinner) {
+      const organizer = getOrganizer(draft)!;
+      const open = (await this.store.list())
+        .filter((e) => e.stage !== "settled" && contactsOf(organizer).some((c) => isOrganizerContact(e, c)))
+        .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
+      if (open) {
+        throw new FoError(
+          "OPEN_DINNER",
+          `${organizer.name} already has an open dinner, "${open.title}" (event_id ${open.id}, stage ${open.stage}). ` +
+            `If this receipt is from that meal, call add_receipt with event_id ${open.id}. ` +
+            `Only if ${organizer.name} says it's from a different meal, call create_event again with separate_dinner: true. Nothing was created.`,
+        );
+      }
+    }
+
     let id = generateEventId(draft.title);
     for (let tries = 0; (await this.store.get(id)) && tries < 10; tries++) id = generateEventId(draft.title);
     if (await this.store.get(id)) throw new Error("Could not find a free event id");
@@ -683,6 +725,7 @@ export class FoSquadService {
           next.preferences = next.preferences.map((p) => ({ ...p, slotIds: [], anyTime: false, slotsStale: true }));
           delete next.chosenSlotId;
           delete next.chosenCuisine;
+          delete next.shiftCheck;
           next.restaurantOptions = [];
           next.votes = [];
           delete next.winningRestaurantId;
@@ -733,7 +776,11 @@ export class FoSquadService {
     const { event, data } = await this.mutate(args.event_id, (e, nowIso) => {
       const person = requirePerson(e, args.person);
       assertCanText(person);
-      if (e.stage !== "planning" || e.chosenSlotId || isLateReply(e.replyDeadline, nowIso)) throw this.planLocked(e);
+      // Someone pick_time asked about shifting can still answer after the reply deadline.
+      const askedToShift = e.shiftCheck?.asks.some((a) => a.personId === person.id) ?? false;
+      if (e.stage !== "planning" || e.chosenSlotId || (isLateReply(e.replyDeadline, nowIso) && !askedToShift)) {
+        throw this.planLocked(e);
+      }
 
       const valid = new Set(e.timeSlots.map((s) => s.id));
       const slotIds = [...new Set(args.slot_ids.map((s) => s.trim().toUpperCase()).filter(Boolean))].sort();
@@ -766,6 +813,10 @@ export class FoSquadService {
 
       const unchanged = prev && JSON.stringify({ ...prev, updatedAt: "" }) === JSON.stringify({ ...pref, updatedAt: "" });
       if (!unchanged) e.preferences = [...e.preferences.filter((p) => p.personId !== person.id), pref];
+      // A "no" changes nothing but still answers the shift question.
+      if (askedToShift && !e.shiftCheck!.answeredIds.includes(person.id)) {
+        e.shiftCheck!.answeredIds = [...e.shiftCheck!.answeredIds, person.id];
+      }
       return { event: e, data: { person, pref: unchanged ? prev : pref } };
     });
 
@@ -781,6 +832,9 @@ export class FoSquadService {
         ...(p.budgetCents !== undefined ? { budget: formatCents(p.budgetCents), budget_is_private: true } : {}),
       },
       pending: getStatus(event, this.clock()).pending.map((x) => x.name),
+      ...(event.shiftCheck && !event.chosenSlotId
+        ? { waiting_on_shift: namesOf(event, shiftWaiting(event, this.nowIso())) }
+        : {}),
     });
   }
 
@@ -804,7 +858,7 @@ export class FoSquadService {
 
   // ----- pick_time -----
 
-  async pickTime(args: ForceArgs): Promise<ToolResult> {
+  async pickTime(args: PickTimeArgs): Promise<ToolResult> {
     const nowIso = this.nowIso();
     const peek = await this.load(args.event_id);
     assertStage(peek, ["planning"], "pick a time");
@@ -830,6 +884,8 @@ export class FoSquadService {
     interface Decision {
       time: PickTimeResult;
       prio: string[];
+      /** "asked" when this call opened the shift check, "waiting" while it's still open. */
+      shift?: "asked" | "waiting";
       cuisine?: PickCuisineResult;
       constraints?: HardConstraints;
       goingPrefs?: Preferences[];
@@ -839,15 +895,34 @@ export class FoSquadService {
       const invited = e.people.filter((p) => !p.optedOut);
       const prio = priorityIds(concessions, invited);
       const names = nameMap(e);
+      const prefs = withOrganizer(e, timePrefs(e), nowIso);
       const time = pickTime({
         slots: e.timeSlots,
-        preferences: withOrganizer(e, timePrefs(e), nowIso),
+        preferences: prefs,
         invitedIds: invited.map((p) => p.id),
         organizerId: e.organizerId,
         priorityIds: prio,
         names,
       });
       if (!time.slotId) return { event: e, data: { time, prio } };
+
+      // Someone would miss out: ask them before locking anything, once per round.
+      if (time.status === "majority" && !args.skip_shift_check) {
+        if (!e.shiftCheck) {
+          const asks = shiftAsks(e, time, prefs);
+          if (asks.length) {
+            e.shiftCheck = {
+              askedAt: nowIso,
+              deadline: new Date(Date.parse(nowIso) + SHIFT_WINDOW_MS).toISOString(),
+              asks,
+              answeredIds: [],
+            };
+            return { event: e, data: { time, prio, shift: "asked" } };
+          }
+        } else if (shiftWaiting(e, nowIso).length) {
+          return { event: e, data: { time, prio, shift: "waiting" } };
+        }
+      }
 
       const slotId = time.slotId;
       const going = new Set(time.canMake);
@@ -869,6 +944,47 @@ export class FoSquadService {
     const invited = event.people.filter((p) => !p.optedOut);
     const note = fairnessNote({ people: invited, priorityContacts: priorityContactsOf(event, prio) });
     const ranking = time.ranking.map((r) => ({ slot_id: r.slotId, label: r.label, can_make: r.count }));
+
+    if (data.shift && event.shiftCheck) {
+      const check = event.shiftCheck;
+      const waiting = new Set(shiftWaiting(event, nowIso));
+      const most = time.ranking[0]?.count ?? 0;
+      const top = time.ranking.filter((r) => r.count === most);
+      const respondents = time.canMake.length + time.cantMake.length;
+      const reason =
+        top.length > 1
+          ? `${joinNames(top.map((r) => r.label))} each work for ${most} of ${respondents}, a tie. Nothing is locked yet.`
+          : `${top[0]!.label} works for ${most} of ${respondents}. Nothing is locked yet.`;
+      const asks = check.asks
+        .filter((a) => data.shift === "asked" || waiting.has(a.personId))
+        .map((a) => {
+          const person = event.people.find((p) => p.id === a.personId)!;
+          const pref = event.preferences.find((p) => p.personId === a.personId);
+          const labels = a.slotIds.map((id) => slotLabel(event, id)!);
+          return {
+            person_id: person.id,
+            name: person.name,
+            ...contactJson(person),
+            ask_about: a.slotIds.map((id) => ({ id, label: slotLabel(event, id) })),
+            current_answer: pref?.anyTime ? "any time" : (pref?.slotIds ?? []),
+            message: `Quick one for ${event.title}: could ${joinNames(labels, "or")} work for you after all? No worries if not.`,
+          };
+        });
+      return this.ok(event, {
+        decided: false,
+        status: "check_shift",
+        reason,
+        ask_to_shift: asks,
+        shift_deadline: check.deadline,
+        ranking,
+        can_make: namesOf(event, time.canMake),
+        cant_make: namesOf(event, time.cantMake),
+        no_reply: namesOf(event, time.noReply),
+        tell_organizer: `${reason} Checking privately with ${joinNames(asks.map((a) => a.name))} whether another time could work for them.`,
+      }, data.shift === "asked"
+        ? "Before locking a time, send each ask_to_shift message privately (one per person) and tell the organizer. Record each answer with record_preferences, sending their full list of letters (current_answer plus any new one), even when the answer is no. Schedule pick_time at shift_deadline. If the organizer says to decide now, call pick_time with skip_shift_check: true."
+        : `Still waiting on ${joinNames(asks.map((a) => a.name))} about shifting. Call pick_time again when they answer or at ${check.deadline}, or with skip_shift_check: true if the organizer says to decide now.`);
+    }
 
     if (!time.slotId || !data.cuisine || !data.constraints) {
       const best = time.bestSlotId ? event.timeSlots.find((s) => s.id === time.bestSlotId) : undefined;
@@ -912,6 +1028,7 @@ export class FoSquadService {
       can_make: namesOf(event, time.canMake),
       cant_make: namesOf(event, time.cantMake),
       no_reply: namesOf(event, time.noReply),
+      ...(event.shiftCheck ? { asked_to_shift: namesOf(event, event.shiftCheck.asks.map((a) => a.personId)) } : {}),
       party_size: time.partySize,
       cuisine: {
         winner: cuisine.cuisine ?? null,
@@ -1169,6 +1286,7 @@ export class FoSquadService {
   async addReceipt(args: AddReceiptArgs): Promise<ToolResult> {
     const { event, data } = await this.mutate(args.event_id, (e, nowIso) => {
       assertStage(e, ["planning", "voting", "booked", "claiming"], "add a receipt");
+      const fromStage = e.stage;
       const first = nextItemNumber(e.receipts);
       const items: LineItem[] = args.items.map((item, i) => ({
         number: first + i,
@@ -1204,7 +1322,7 @@ export class FoSquadService {
       const sig = (r: Pick<Receipt, "items" | "subtotalCents" | "taxCents" | "tipCents">) =>
         JSON.stringify([r.items.map((i) => [i.description, i.amountCents]), r.subtotalCents, r.taxCents, r.tipCents]);
       const existing = e.receipts.find((r) => sig(r) === sig({ items, subtotalCents: subtotal, taxCents: tax, tipCents: tip }));
-      if (existing) return { event: e, data: { receipt: existing, duplicate: true, printedTotal: total, warnings: [] as string[] } };
+      if (existing) return { event: e, data: { receipt: existing, duplicate: true, printedTotal: total, warnings: [] as string[], fromStage } };
 
       // buildSplitInput adds booking.depositCents back and expects receipt totals
       // net of it. So the deposit lives in exactly one place:
@@ -1248,7 +1366,7 @@ export class FoSquadService {
         );
       }
       e.receipts = [...e.receipts, receipt];
-      return { event: transition(e, "claiming", nowIso), data: { receipt, duplicate: false, printedTotal: total, warnings } };
+      return { event: transition(e, "claiming", nowIso), data: { receipt, duplicate: false, printedTotal: total, warnings, fromStage } };
     });
 
     const allItems = event.receipts.flatMap((r) => r.items);
@@ -1268,7 +1386,9 @@ export class FoSquadService {
       total_to_split: formatCents(toSplit),
       item_list: itemList(allItems),
       ...(data.warnings.length ? { warnings: data.warnings } : {}),
-    });
+    }, data.fromStage === "planning" || data.fromStage === "voting"
+      ? `The ${data.fromStage === "planning" ? "time question" : "restaurant vote"} for this dinner is over: cancel any nudge or deadline actions you scheduled for it, and don't tally or announce anything from it.`
+      : undefined);
   }
 
   // ----- set_attendees -----
@@ -1351,8 +1471,20 @@ export class FoSquadService {
     const attendeeIds = event.attendeeIds ?? [];
     const analysis = analyzeClaims(allItems, event.claims, attendeeIds, event.claimAnsweredIds);
     const byNumber = new Map(allItems.map((i) => [i.number, i]));
+    const warnings: string[] = [];
+    // "1, 2, ..., 10" from one person usually means "I shared everything", not "it was all mine".
+    const others = attendeeIds.filter((id) => id !== data.person.id);
+    if (allItems.length > 1 && others.length > 0 && data.mine.length === allItems.length) {
+      const name = data.person.name;
+      warnings.push(
+        `${name} claimed all ${allItems.length} items. Before calculating, check with ${name}: did they share everything, or have it all to themselves? ` +
+          `Any item someone else also claims is split with ${name}.` +
+          (analysis.pendingAttendeeIds.length ? ` ${joinNames(namesOf(event, analysis.pendingAttendeeIds))} still need to claim their own items.` : ""),
+      );
+    }
     return this.ok(event, {
       person: { id: data.person.id, name: data.person.name },
+      ...(warnings.length ? { warnings } : {}),
       claimed: data.mine.map((c) => ({
         number: c.itemNumber,
         description: byNumber.get(c.itemNumber)?.description,
@@ -1377,6 +1509,18 @@ export class FoSquadService {
       const overrides = args.unclaimed_policy === "split_evenly" || args.treated !== undefined;
       if (overrides) assertOrganizer(e, senderOf(args), "split unclaimed items evenly or set who's being treated");
       if (!e.attendeeIds) throw invalid("Confirm who came with set_attendees first.");
+
+      // Running the split early gives anyone who hasn't claimed a $0 share.
+      const allItems = e.receipts.flatMap((r) => r.items);
+      const pendingIds = analyzeClaims(allItems, e.claims, e.attendeeIds, e.claimAnsweredIds).pendingAttendeeIds;
+      if (pendingIds.length) {
+        const who = joinNames(namesOf(e, pendingIds));
+        throw new FoError(
+          "CLAIMS_PENDING",
+          `${e.attendeeIds.length - pendingIds.length} of ${e.attendeeIds.length} have claimed their items; still waiting on ${who}. ` +
+            `Check their replies and record_claims for each one. If they really haven't answered, wait, or ask the organizer what ${who} had and record_claims for them ("${namesOf(e, pendingIds)[0]}: none" if nothing). Nothing was calculated.`,
+        );
+      }
 
       if (args.unclaimed_policy) e.unclaimedPolicy = args.unclaimed_policy;
       if (args.fees_split_evenly !== undefined) e.feesSplitEvenly = args.fees_split_evenly;
@@ -1442,7 +1586,7 @@ export class FoSquadService {
       total_cents: totalCents,
       total: formatCents(totalCents),
       summary,
-      ask_organizer: `${friends.length} of ${friends.length} answered. ${summary} Send?`,
+      ask_organizer: `${rows.length} of ${rows.length} claimed. ${summary} Send?`,
       shares: rows.map((r) => ({
         ...shareJson(event, r.share),
         ...(r.isOrganizer ? { is_organizer: true } : {}),

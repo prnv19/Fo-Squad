@@ -8,9 +8,9 @@ export function displayName(id: string, names?: NameMap): string {
 }
 
 /** "Sam", "Sam and Alex", "Sam, Alex and Jo". */
-export function joinNames(items: readonly string[]): string {
+export function joinNames(items: readonly string[], conjunction: "and" | "or" = "and"): string {
   if (items.length <= 1) return items[0] ?? "";
-  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+  return `${items.slice(0, -1).join(", ")} ${conjunction} ${items[items.length - 1]}`;
 }
 
 export function normalizeTag(value: string): string {

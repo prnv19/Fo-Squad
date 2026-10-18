@@ -203,6 +203,10 @@ describe("email edge cases", () => {
     const first = await createLunch();
     for (const who of ["Dana", "Lee", "Ravi"]) ok(await svc.recordPreferences({ event_id: first.id, person: who, slot_ids: ["A"] }));
     ok(await svc.recordPreferences({ event_id: first.id, person: "Kim", slot_ids: ["B"] }));
+    const asked = ok(await svc.pickTime({ event_id: first.id, force: true }));
+    expect(asked).toMatchObject({ decided: false, status: "check_shift", ask_to_shift: [{ name: "Kim", email: EMAILS.kim, channel: "email" }] });
+    // Kim says no: same answer, but it still closes the question.
+    ok(await svc.recordPreferences({ event_id: first.id, person: "Kim", slot_ids: ["B"] }));
     ok(await svc.pickTime({ event_id: first.id, force: true }));
     expect(await store.getConcessions()).toContainEqual(expect.objectContaining({ contact: EMAILS.kim, what: "time slot" }));
   });

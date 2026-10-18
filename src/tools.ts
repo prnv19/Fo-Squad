@@ -76,6 +76,10 @@ export const TOOLS: readonly ToolDef[] = [
       cuisine_hint: z.string().optional(),
       reply_deadline: z.string().optional().describe("ISO time. Defaults to 2 hours from now."),
       organizer_pick: organizerPick.optional(),
+      separate_dinner: z
+        .boolean()
+        .optional()
+        .describe("Split-only night (no time_slots) while the organizer has another open dinner: true only once they said the receipt is from a different meal."),
     },
     run: (service, args) => service.createEvent(args),
   }),
@@ -130,8 +134,15 @@ export const TOOLS: readonly ToolDef[] = [
     name: "pick_time",
     title: "Pick the time",
     description:
-      "Call when everyone answered, or at the deadline (force: true to decide early). Returns the slot, who can and can't make it, party_size, the winning cuisine, hard_constraints every restaurant must meet, and any fairness_note; status no_overlap means ask the organizer for new times via update_event.",
-    inputShape: { event_id: eventId, force },
+      "Call when everyone answered, or at the deadline (force: true to decide early). If the best time leaves someone out, the first call locks nothing and returns status check_shift with ask_to_shift: a private question for each person who'd miss out; record their answers, then call again. Once decided, returns the slot, who can and can't make it, party_size, the winning cuisine, hard_constraints every restaurant must meet, and any fairness_note; status no_overlap means ask the organizer for new times via update_event.",
+    inputShape: {
+      event_id: eventId,
+      force,
+      skip_shift_check: z
+        .boolean()
+        .optional()
+        .describe("Only when the organizer says to decide now: lock the best time without asking (or waiting on) whoever would miss out."),
+    },
     run: (service, args) => service.pickTime(args),
   }),
   defineTool({

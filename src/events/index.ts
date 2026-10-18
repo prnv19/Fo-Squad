@@ -34,7 +34,7 @@ export {
   transition,
   TRANSITIONS,
 } from "./stage.js";
-export { getStatus, type EventStatus, type PendingPerson } from "./status.js";
+export { getStatus, shiftWaiting, type EventStatus, type PendingPerson } from "./status.js";
 export {
   createStore,
   FileStore,

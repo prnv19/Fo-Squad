@@ -5,7 +5,9 @@ export type FoErrorCode =
   | "NOT_ORGANIZER"
   | "PLAN_LOCKED"
   | "INVALID_INPUT"
-  | "OPTED_OUT";
+  | "OPTED_OUT"
+  | "CLAIMS_PENDING"
+  | "OPEN_DINNER";
 
 /**
  * An error whose message is safe and useful for Fo to relay to the organizer.

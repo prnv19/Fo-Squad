@@ -227,6 +227,20 @@ export interface Payment {
 
 // ---------- The event ----------
 
+/**
+ * Before locking a time that leaves someone out, pick_time asks each of them
+ * privately whether one of the best times could work after all.
+ */
+export interface ShiftCheck {
+  askedAt: string;
+  /** pick_time decides at this point even if some of them never answered. */
+  deadline: string;
+  /** Who was asked, and about which slots. */
+  asks: { personId: string; slotIds: string[] }[];
+  /** People who answered the question, including a "no" that changed nothing. */
+  answeredIds: string[];
+}
+
 export interface DinnerEvent {
   id: string;
   title: string;
@@ -252,6 +266,8 @@ export interface DinnerEvent {
   chosenSlotId?: string;
   /** Winning cuisine from pick_time, so next actions can name it. */
   chosenCuisine?: string;
+  /** Set when pick_time asked whoever would miss the best time whether they can shift. Once per round of time options. */
+  shiftCheck?: ShiftCheck;
 
   // Voting
   organizerPick?: { restaurantName: string; firmness: PickFirmness };

@@ -56,7 +56,7 @@ function ok(r: ToolResult): ToolResult {
   return r;
 }
 
-async function create(opts: { slots?: boolean; venmo?: boolean; budget?: string } = {}) {
+async function create(opts: { slots?: boolean; venmo?: boolean; budget?: string; separate?: boolean } = {}) {
   const r = await svc.createEvent({
     title: "Saturday dinner",
     organizer: { name: "Pranav", phone: "555-000-1111", ...(opts.venmo === false ? {} : { venmo: "@pranav-u" }) },
@@ -70,6 +70,7 @@ async function create(opts: { slots?: boolean; venmo?: boolean; budget?: string 
     ...(opts.slots === false ? {} : { time_slots: SLOTS }),
     budget_per_person: opts.budget ?? "50",
     cuisine_hint: "Italian",
+    ...(opts.separate ? { separate_dinner: true } : {}),
   });
   return { r, id: r.event_id as string };
 }
@@ -335,9 +336,15 @@ describe("planning rules", () => {
     }
     // Maya's dietary answer carried over even though she only sent letters.
     expect((await store.get(id))?.preferences.find((p) => p.personId === "maya")?.dietary).toEqual(["vegetarian"]);
+    // Alex would miss Tue, so pick_time asks first and locks nothing.
+    const check = ok(await svc.pickTime({ event_id: id }));
+    expect(check).toMatchObject({ decided: false, status: "check_shift", ask_to_shift: [{ name: "Alex", ask_about: [{ id: "B" }] }] });
+    expect((await store.get(id))?.chosenSlotId).toBeUndefined();
+    // At the shift deadline it decides without Alex's answer.
+    at("2026-10-17T19:30:00.000Z");
     const second = ok(await svc.pickTime({ event_id: id }));
-    expect(second).toMatchObject({ decided: true, status: "majority", slot: { id: "B", label: "Tue 7pm" }, cant_make: ["Alex"], party_size: 5 });
-    expect(await store.getConcessions()).toContainEqual({ contact: PHONES.alex, eventId: id, what: "time slot", at: "2026-10-17T19:00:00.000Z" });
+    expect(second).toMatchObject({ decided: true, status: "majority", slot: { id: "B", label: "Tue 7pm" }, cant_make: ["Alex"], asked_to_shift: ["Alex"], party_size: 5 });
+    expect(await store.getConcessions()).toContainEqual({ contact: PHONES.alex, eventId: id, what: "time slot", at: "2026-10-17T19:30:00.000Z" });
   });
 
   it("moves back to planning when slots change during voting", async () => {
@@ -514,7 +521,7 @@ describe("receipts", () => {
     await svc.confirmBooking({ event_id: id, by_phone: PHONES.pranav, restaurant_name: "Luigi's", auto_gratuity: true });
     const r = ok(await svc.addReceipt({ event_id: id, ...RECEIPT }));
     expect(r.warnings).toEqual([expect.stringContaining("tipping twice")]);
-    const included = await create({ slots: false });
+    const included = await create({ slots: false, separate: true });
     expect((await svc.addReceipt({ event_id: included.id, ...RECEIPT, tip_included: true })).warnings).toBeUndefined();
   });
 
@@ -703,5 +710,172 @@ describe("people and status", () => {
       code: "INVALID_INPUT",
       message: expect.stringContaining("budget"),
     });
+  });
+});
+
+describe("fixes from the Denver lunch run", () => {
+  const DENVER = {
+    organizer: "+15550002222",
+    madhav: "madhav@example.com",
+    vyshak: "vyshak@example.com",
+    kevin: "kevin@example.com",
+  };
+
+  async function denverLunch() {
+    const r = await svc.createEvent({
+      title: "Denver lunch",
+      organizer: { name: "Pranav", phone: DENVER.organizer, venmo: "prnv1901" },
+      friends: [
+        { name: "Madhav", email: DENVER.madhav },
+        { name: "Vyshak", email: DENVER.vyshak },
+        { name: "Kevin", email: DENVER.kevin },
+      ],
+      time_slots: [
+        { label: "Sun 12:30pm", starts_at: "2026-10-18T18:30:00.000Z" },
+        { label: "Sun 1:30pm", starts_at: "2026-10-18T19:30:00.000Z" },
+        { label: "Sat 12:30pm", starts_at: "2026-10-24T18:30:00.000Z" },
+        { label: "Sat 1:30pm", starts_at: "2026-10-24T19:30:00.000Z" },
+      ],
+      budget_per_person: "30",
+    });
+    const id = r.event_id as string;
+    // The real answers: a three-way tie between B, C and D.
+    ok(await svc.recordPreferences({ event_id: id, person: "Pranav", slot_ids: ["B", "C", "D"] }));
+    ok(await svc.recordPreferences({ event_id: id, person: "Vyshak", slot_ids: ["B", "C", "D"] }));
+    ok(await svc.recordPreferences({ event_id: id, person: "Madhav", slot_ids: ["B"], dietary: ["nut allergy"] }));
+    ok(await svc.recordPreferences({ event_id: id, person: "Kevin", slot_ids: ["C", "D"] }));
+    return id;
+  }
+
+  it("asks whoever would miss out before locking a tied time", async () => {
+    const id = await denverLunch();
+    const check = ok(await svc.pickTime({ event_id: id }));
+    expect(check).toMatchObject({
+      decided: false,
+      status: "check_shift",
+      shift_deadline: "2026-10-17T18:30:00.000Z",
+      ask_to_shift: [
+        { name: "Madhav", email: DENVER.madhav, ask_about: [{ id: "C" }, { id: "D" }], current_answer: ["B"] },
+        { name: "Kevin", email: DENVER.kevin, ask_about: [{ id: "B" }], current_answer: ["C", "D"] },
+      ],
+    });
+    expect(check.reason).toMatch(/tie/);
+    expect((check.ask_to_shift as { message: string }[])[1]!.message).toBe(
+      "Quick one for Denver lunch: could Sun 1:30pm work for you after all? No worries if not.",
+    );
+    expect((check.ask_to_shift as { message: string }[])[0]!.message).toContain("Sat 12:30pm or Sat 1:30pm");
+    expect((await store.get(id))?.chosenSlotId).toBeUndefined();
+    expect((await svc.getStatus({ event_id: id })).next_action).toMatch(/Waiting on Madhav and Kevin about whether another time could work/);
+
+    // Calling again before anyone answers still locks nothing.
+    expect(ok(await svc.pickTime({ event_id: id }))).toMatchObject({ decided: false, status: "check_shift", ask_to_shift: [{ name: "Madhav" }, { name: "Kevin" }] });
+
+    // Kevin can do Sunday after all.
+    const kevin = ok(await svc.recordPreferences({ event_id: id, person: DENVER.kevin, slot_ids: ["B", "C", "D"] }));
+    expect(kevin.waiting_on_shift).toEqual(["Madhav"]);
+
+    // Past the reply deadline, only the people asked can still answer.
+    at("2026-10-17T18:10:00.000Z");
+    await svc.updateEvent({ event_id: id, by_phone: DENVER.organizer, reply_deadline: "2026-10-17T18:15:00.000Z" });
+    at("2026-10-17T18:20:00.000Z");
+    await expect(svc.recordPreferences({ event_id: id, person: "Vyshak", slot_ids: ["C"] })).rejects.toMatchObject({ code: "PLAN_LOCKED" });
+    // Madhav says no: nothing changes, but the question is answered.
+    const madhav = ok(await svc.recordPreferences({ event_id: id, person: "Madhav", slot_ids: ["B"] }));
+    expect(madhav.waiting_on_shift).toEqual([]);
+
+    const decided = ok(await svc.pickTime({ event_id: id }));
+    expect(decided).toMatchObject({
+      decided: true,
+      status: "unanimous",
+      slot: { id: "B", label: "Sun 1:30pm" },
+      cant_make: [],
+      asked_to_shift: ["Madhav", "Kevin"],
+      party_size: 4,
+    });
+    expect(decided.tell_privately).toBeUndefined();
+  });
+
+  it("decides without asking when the organizer says to decide now", async () => {
+    const id = await denverLunch();
+    const r = ok(await svc.pickTime({ event_id: id, skip_shift_check: true }));
+    expect(r).toMatchObject({ decided: true, status: "majority", tie_broken_by: "earliest", cant_make: ["Kevin"] });
+    expect(r.asked_to_shift).toBeUndefined();
+  });
+
+  it("new time options start a fresh shift check", async () => {
+    const id = await denverLunch();
+    ok(await svc.pickTime({ event_id: id }));
+    expect((await store.get(id))?.shiftCheck).toBeDefined();
+    await svc.updateEvent({
+      event_id: id,
+      by_phone: DENVER.organizer,
+      time_slots: [{ label: "Sat 2pm", starts_at: "2026-10-24T20:00:00.000Z" }],
+    });
+    expect((await store.get(id))?.shiftCheck).toBeUndefined();
+  });
+
+  async function denverSplit() {
+    const id = await denverLunch();
+    ok(await svc.pickTime({ event_id: id, skip_shift_check: true }));
+    ok(
+      await svc.setRestaurantOptions({
+        event_id: id,
+        options: [
+          { name: "Spice Room", cuisine: "Indian", price_per_person: 25, notes: "nut-free kitchen" },
+          { name: "Aloy Modern Thai", cuisine: "Thai", price_per_person: 25, notes: "nut-free options" },
+        ],
+      }),
+    );
+    expect((await store.get(id))?.stage).toBe("voting");
+    const receipt = ok(await svc.addReceipt({ event_id: id, ...RECEIPT }));
+    ok(await svc.setAttendees({ event_id: id, people: ["Pranav", "Madhav", "Vyshak", "Kevin"] }));
+    return { id, receipt };
+  }
+
+  it("a receipt during voting says to drop the old timers", async () => {
+    const { receipt } = await denverSplit();
+    expect(receipt.next_action).toMatch(/^The restaurant vote for this dinner is over: cancel any nudge or deadline actions/);
+  });
+
+  it("refuses to split while anyone hasn't claimed, and warns when one person claims everything", async () => {
+    const { id } = await denverSplit();
+    const all = ok(await svc.recordClaims({ event_id: id, claim: "Pranav: 1, 2, 3, 4, 5" }));
+    expect(all.warnings).toEqual([
+      "Pranav claimed all 5 items. Before calculating, check with Pranav: did they share everything, or have it all to themselves? " +
+        "Any item someone else also claims is split with Pranav. Madhav, Vyshak and Kevin still need to claim their own items.",
+    ]);
+    ok(await svc.recordClaims({ event_id: id, claim: "Kevin: 1, 3" }));
+    ok(await svc.recordClaims({ event_id: id, claim: "Vyshak: 2" }));
+
+    // Madhav's reply hasn't been recorded: no $0 share for him.
+    await expect(svc.calculateShares({ event_id: id })).rejects.toMatchObject({
+      code: "CLAIMS_PENDING",
+      message: expect.stringContaining("3 of 4 have claimed their items; still waiting on Madhav."),
+    });
+    expect((await store.get(id))?.stage).toBe("claiming");
+
+    const partial = ok(await svc.recordClaims({ event_id: id, claim: "Madhav: 4" }));
+    expect(partial.warnings).toBeUndefined();
+    const shares = ok(await svc.calculateShares({ event_id: id }));
+    expect(shares.ask_organizer).toMatch(/^4 of 4 claimed\. Totals: /);
+    const madhav = (shares.shares as { name: string; total_cents: number }[]).find((s) => s.name === "Madhav");
+    expect(madhav?.total_cents).toBeGreaterThan(0);
+  });
+
+  it("points a receipt at the organizer's open dinner instead of starting a new one", async () => {
+    const id = await denverLunch();
+    const receiptOnly = {
+      title: "Saffron Spoon",
+      organizer: { name: "Pranav", phone: DENVER.organizer },
+      friends: [{ name: "Madhav", email: DENVER.madhav }],
+    };
+    await expect(svc.createEvent(receiptOnly)).rejects.toMatchObject({
+      code: "OPEN_DINNER",
+      message: expect.stringContaining(`call add_receipt with event_id ${id}`),
+    });
+    const separate = ok(await svc.createEvent({ ...receiptOnly, separate_dinner: true }));
+    expect(separate.event_id).not.toBe(id);
+    // Planning a second dinner with times is still fine.
+    ok(await svc.createEvent({ ...receiptOnly, title: "Next week", time_slots: [{ label: "Fri 7pm", starts_at: "2026-10-31T01:00:00.000Z" }] }));
   });
 });

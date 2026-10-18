@@ -49,6 +49,19 @@ function canMakeChosenSlot(event: DinnerEvent, person: Person): boolean {
   return pref.anyTime || pref.slotIds.includes(event.chosenSlotId);
 }
 
+/**
+ * Ids of people pick_time asked about shifting who haven't answered yet. Empty
+ * once its deadline passes, since pick_time then decides without them.
+ */
+export function shiftWaiting(event: DinnerEvent, now: string | number): string[] {
+  const check = event.shiftCheck;
+  if (!check || event.chosenSlotId) return [];
+  const nowMs = typeof now === "number" ? now : Date.parse(now);
+  if (nowMs >= Date.parse(check.deadline)) return [];
+  const active = new Set(event.people.filter((p) => !p.optedOut).map((p) => p.id));
+  return check.asks.map((a) => a.personId).filter((id) => active.has(id) && !check.answeredIds.includes(id));
+}
+
 function planningStatus(event: DinnerEvent, nowMs: number): StageResult {
   const friends = event.people.filter((p) => p.id !== event.organizerId);
   // A reply whose slot answers were cleared by new time options still needs answering.
@@ -132,6 +145,24 @@ function planningStatus(event: DinnerEvent, nowMs: number): StageResult {
       details,
       nextAction: "Every friend on this dinner opted out of texts. Let the organizer know.",
     };
+  }
+
+  if (event.shiftCheck) {
+    const waiting = shiftWaiting(event, nowMs);
+    details.shiftCheck = {
+      asked: event.people.filter((p) => event.shiftCheck!.asks.some((a) => a.personId === p.id)).map((p) => p.name),
+      waitingOn: event.people.filter((p) => waiting.includes(p.id)).map((p) => p.name),
+      deadline: event.shiftCheck.deadline,
+    };
+    if (waiting.length > 0) {
+      const who = names(event.people.filter((p) => waiting.includes(p.id)));
+      return {
+        pending,
+        details,
+        nextAction: `Waiting on ${who} about whether another time could work (pick_time sent the question). Record each answer with record_preferences, then call pick_time; or call it at ${event.shiftCheck.deadline}.`,
+      };
+    }
+    return { pending, details, nextAction: "Everyone asked about shifting has answered, or their time is up. Call pick_time." };
   }
 
   if (pending.length === 0) {
