@@ -20,6 +20,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --from=build /app/dist ./dist
+# get_playbook serves this to Fo (Wajo has no place for standing instructions).
+COPY docs/standing-instructions.md ./docs/standing-instructions.md
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # Mount a persistent volume here (fly.toml / render.yaml do); without one, state is lost on restart.
 ENV DATA_DIR=/data

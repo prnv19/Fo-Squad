@@ -32,7 +32,7 @@ You own the timers with scheduled actions. Schedule each one **once**, in the tu
 | --- | --- |
 | Invites go out (Planning step 4) | A nudge 30 minutes before the reply deadline, and a decision at the deadline |
 | Vote texts go out (Voting step 1) | A nudge 30 minutes before the vote deadline, and a decision at the deadline |
-| `confirm_booking` succeeds | The day-of reminder on the afternoon of the dinner, and a receipt check 2 hours after it starts |
+| `confirm_booking` succeeds | The day-of reminder on the afternoon of the dinner, and the bill question 2 hours after it starts |
 | Totals go out (Paying step 1) | Payment reminders at 24 and 72 hours |
 
 Put the dinner's `event_id` and the step in each action's note ("weekend-dinner-bp0e: planning deadline"). When an action fires, call `get_status` with that `event_id` first and do only what is still needed. Skip people who already answered or paid; their contacts are in `pending`. If the step is already done, do nothing.
@@ -86,8 +86,18 @@ Put the dinner's `event_id` and the step in each action's note ("weekend-dinner-
 2. On the afternoon of the dinner, text each attendee:
    > Reminder: Luigi's tonight at 7:30!
 3. If the organizer approves a change after booking, call the restaurant to update the party size or cancel.
+4. **After the dinner, ask the organizer about the bill** (the timer 2 hours after it starts). Never ask friends for money before the organizer decides:
+   > Hope Saturday dinner was great! Want me to split the bill, or is it on you?
+
+   - **Split:** ask for the receipt photo and go to Claiming.
+   - **Their treat:** call `cover_bill` with `by_phone` or `by_email` (the organizer's). The dinner closes with no split. Thank the organizer and send friends nothing about money, unless the organizer asks you to thank them on their behalf.
+   - **No answer:** remind once the next day, then wait.
+
+   If the organizer already sent a receipt and asked you to split it, that's their answer: don't ask again.
 
 ## Stage 4: Claiming
+
+The organizer chose to split (or sent a receipt asking you to). If they change their mind and say it's their treat before the totals go out, call `cover_bill`. After the totals go out it's refused: confirm each person with `mark_paid` from the organizer and tell them it's covered.
 
 1. Read the receipt: every line item (description and line total), subtotal, tax, tip, fees, discount, total.
    - **Blurry, cut off or unreadable:** ask for a clearer photo. Never guess.

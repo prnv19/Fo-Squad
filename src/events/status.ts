@@ -233,7 +233,8 @@ function bookedStatus(event: DinnerEvent, nowMs: number): StageResult {
   return {
     pending: [],
     details,
-    nextAction: "After dinner, ask the organizer for the receipt photo, then call add_receipt.",
+    nextAction:
+      'After dinner, ask the organizer: "Want me to split the bill, or is it on you?" Split: ask for the receipt photo, then call add_receipt. Their treat: call cover_bill (by_phone or by_email = the organizer\'s) and send nobody a payment request.',
   };
 }
 
@@ -368,7 +369,9 @@ export function getStatus(event: DinnerEvent, now: Date | string): EventStatus {
       result = payingStatus(event);
       break;
     case "settled":
-      result = { pending: [], details: {}, nextAction: "Everyone's paid. Night complete!" };
+      result = event.organizerCovered
+        ? { pending: [], details: { organizerCovered: true }, nextAction: "The organizer covered the bill, so nobody owes anything. Night complete!" }
+        : { pending: [], details: {}, nextAction: "Everyone's paid. Night complete!" };
       break;
   }
 

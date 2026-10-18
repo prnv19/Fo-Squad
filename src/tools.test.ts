@@ -21,13 +21,15 @@ const CONTRACT_TOOLS = [
   "set_attendees",
   "record_claims",
   "calculate_shares",
+  "cover_bill",
   "mark_paid",
   "record_opt_out",
+  "get_playbook",
   "get_status",
 ];
 
 describe("tool registry", () => {
-  it("has exactly the 16 contract tools, each with a usable shape", () => {
+  it("has exactly the 18 contract tools, each with a usable shape", () => {
     expect([...TOOL_NAMES].sort()).toEqual([...CONTRACT_TOOLS].sort());
     expect(new Set(TOOL_NAMES).size).toBe(TOOLS.length);
     for (const t of TOOLS) {
@@ -39,7 +41,7 @@ describe("tool registry", () => {
 
   it("marks which tools carry by_phone, and whether it's required", () => {
     const withByPhone = TOOLS.filter((t) => "by_phone" in t.inputShape).map((t) => t.name);
-    expect(withByPhone.sort()).toEqual(["calculate_shares", "confirm_booking", "mark_paid", "update_event"]);
+    expect(withByPhone.sort()).toEqual(["calculate_shares", "confirm_booking", "cover_bill", "mark_paid", "update_event"]);
     // by_email stands in for by_phone on an email, so whether one is needed is declared, not in the schema.
     for (const name of withByPhone) expect("by_email" in getTool(name)!.inputShape, name).toBe(true);
     expect(TOOLS.filter((t) => t.sender).map((t) => t.name).sort()).toEqual(withByPhone.sort());

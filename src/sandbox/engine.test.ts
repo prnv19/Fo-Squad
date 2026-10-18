@@ -341,7 +341,7 @@ describe("runSandbox (scripted model, no network)", () => {
     expect(first.body.system[0].text).toContain("# Fo Squad standing instructions");
     expect(first.body.system[0].cache_control).toEqual({ type: "ephemeral" });
     const names = first.body.tools.map((t: { name: string }) => t.name);
-    expect(names).toHaveLength(21);
+    expect(names).toHaveLength(22);
     expect(names).toEqual(expect.arrayContaining(["send_text", "schedule_action", "call_restaurant", "read_receipt_photo", "web_search", "mark_paid"]));
     expect(first.body.tools.find((t: { name: string }) => t.name === "web_search")).toMatchObject({
       type: "web_search_20260209",

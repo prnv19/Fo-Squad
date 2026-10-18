@@ -197,6 +197,10 @@ export interface CalculateSharesArgs extends SenderArgs {
   fees_split_evenly?: boolean;
 }
 
+export interface CoverBillArgs extends SenderArgs {
+  event_id: string;
+}
+
 export interface MarkPaidArgs extends SenderArgs {
   event_id: string;
   person: string;
@@ -1454,6 +1458,35 @@ export class FoSquadService {
         ...(r.person.optedOut ? { do_not_text: true } : {}),
       })),
     }, "Show the organizer the summary and send nothing until they say yes. Then send each person their own message.");
+  }
+
+  // ----- cover_bill -----
+
+  async coverBill(args: CoverBillArgs): Promise<ToolResult> {
+    const { event } = await this.mutate(args.event_id, (e, nowIso) => {
+      if (e.stage === "settled" && e.organizerCovered) return { event: e, data: undefined };
+      assertOrganizer(e, senderOf(args), "cover the bill");
+      if (e.stage === "paying") {
+        throw new FoError(
+          "WRONG_STAGE",
+          `Totals for "${e.title}" already went out. To let everyone off, confirm each person with mark_paid (from the organizer) and tell them it's covered.`,
+        );
+      }
+      assertStage(e, ["booked", "claiming"], "cover the bill");
+      // Asked after the dinner, so the day-of reminder still goes out.
+      if (e.stage === "booked" && e.booking && Date.parse(nowIso) < Date.parse(e.booking.startsAt)) {
+        throw invalid(`"${e.title}" hasn't happened yet. Ask about the bill after the dinner.`);
+      }
+      return { event: { ...transition(e, "settled", nowIso), organizerCovered: true }, data: undefined };
+    });
+    return this.ok(
+      event,
+      {
+        covered: true,
+        tell_organizer: `Done: ${event.title} is on you, so nobody gets a payment request. Thanks for treating everyone!`,
+      },
+      "Don't message friends about money.",
+    );
   }
 
   // ----- mark_paid -----

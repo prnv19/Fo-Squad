@@ -143,7 +143,7 @@ describe("model-visible schemas", () => {
 
   it("include every registry tool plus send_texts and fo_task", () => {
     const names = buildActions(deadline("x"), deps).map((a) => a.name);
-    expect(names).toHaveLength(18);
+    expect(names).toHaveLength(19);
     expect(names.slice(-2)).toEqual(["send_texts", "fo_task"]);
   });
 });

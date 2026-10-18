@@ -184,7 +184,7 @@ describe("ClaudeBrain", () => {
     expect(first.body.thinking).toBeUndefined();
     expect(first.headers.get("anthropic-beta")).toContain("server-side-fallback-2026-07-01");
     const toolNames = first.body.tools.map((t: { name: string }) => t.name);
-    expect(toolNames).toHaveLength(18);
+    expect(toolNames).toHaveLength(19);
     expect(JSON.stringify(first.body.tools)).not.toContain("by_phone");
     expect(first.body.messages[0].content).toContain('<untrusted_text from="+15551230001">');
 

@@ -4,6 +4,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { SERVER_INSTRUCTIONS } from "./playbook.js";
 import type { FoSquadService, ToolResult } from "./service.js";
 import { runServiceCall, TOOLS } from "./tools.js";
 
@@ -19,18 +20,30 @@ function toCallResult(result: ToolResult, isError = false): CallToolResult {
 }
 
 /** Runs a service call and maps errors: FoError messages are safe to relay, anything else is not. */
-export async function runTool(name: string, fn: () => Promise<ToolResult>): Promise<CallToolResult> {
+export async function runTool(name: string, fn: () => Promise<ToolResult>, log?: (line: string) => void): Promise<CallToolResult> {
+  const started = Date.now();
   const { result, isError } = await runServiceCall(name, fn);
+  if (log) {
+    // Tool name, outcome and stage only: arguments and results hold phones, emails and money.
+    const error = isError ? ` error ${String((result.error as { code?: unknown } | undefined)?.code ?? "")}` : " ok";
+    const stage = typeof result.stage === "string" ? ` stage=${result.stage}` : "";
+    log(`tool ${name}${error}${stage} ${Date.now() - started}ms`);
+  }
   return toCallResult(result, isError);
 }
 
-export function createMcpServer(service: FoSquadService): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+export interface McpServerOptions {
+  /** One line per tool call, with no arguments or results. */
+  log?: (line: string) => void;
+}
+
+export function createMcpServer(service: FoSquadService, opts: McpServerOptions = {}): McpServer {
+  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
   for (const tool of TOOLS) {
     server.registerTool(
       tool.name,
       { title: tool.title, description: tool.description, inputSchema: tool.inputShape },
-      (args) => runTool(tool.name, () => tool.run(service, args as Record<string, unknown>)),
+      (args) => runTool(tool.name, () => tool.run(service, args as Record<string, unknown>), opts.log),
     );
   }
   return server;

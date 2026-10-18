@@ -579,6 +579,67 @@ describe("claims and disputes", () => {
   });
 });
 
+describe("organizer covers the bill", () => {
+  // Booked for Sat 7:30pm (02:30Z Sunday); 05:00Z is after dinner.
+  const AFTER_DINNER = "2026-10-25T05:00:00.000Z";
+
+  async function bookedDinner() {
+    const { id } = await create();
+    await planToVoting(id);
+    await voteAndBook(id);
+    return id;
+  }
+
+  it("after dinner, the organizer's treat settles it with no split and no payment requests", async () => {
+    const id = await bookedDinner();
+    at(AFTER_DINNER);
+    const status = await svc.getStatus({ event_id: id });
+    expect(status.next_action).toContain('"Want me to split the bill, or is it on you?"');
+
+    const r = ok(await svc.coverBill({ event_id: id, by_phone: PHONES.pranav }));
+    expect(r).toMatchObject({ stage: "settled", covered: true });
+    expect(r.tell_organizer).toBe("Done: Saturday dinner is on you, so nobody gets a payment request. Thanks for treating everyone!");
+    expect(r.next_action).toBe("Don't message friends about money. The organizer covered the bill, so nobody owes anything. Night complete!");
+    const saved = await store.get(id);
+    expect(saved).toMatchObject({ stage: "settled", organizerCovered: true, payments: [] });
+    // Repeating it changes nothing.
+    expect((await svc.coverBill({ event_id: id, by_phone: PHONES.pranav })).stage).toBe("settled");
+  });
+
+  it("only the organizer can cover it, and only after the dinner", async () => {
+    const id = await bookedDinner();
+    await expect(svc.coverBill({ event_id: id, by_phone: PHONES.pranav })).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: '"Saturday dinner" hasn\'t happened yet. Ask about the bill after the dinner.',
+    });
+    at(AFTER_DINNER);
+    await expect(svc.coverBill({ event_id: id, by_phone: PHONES.maya })).rejects.toMatchObject({ code: "NOT_ORGANIZER" });
+    await expect(svc.coverBill({ event_id: id })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect((await store.get(id))?.stage).toBe("booked");
+  });
+
+  it("works after the receipt is in, but not once totals went out", async () => {
+    const id = await bookedDinner();
+    at(AFTER_DINNER);
+    ok(await svc.addReceipt({ event_id: id, ...RECEIPT }));
+    expect(ok(await svc.coverBill({ event_id: id, by_phone: PHONES.pranav })).stage).toBe("settled");
+
+    const other = await bookedDinner();
+    ok(await svc.addReceipt({ event_id: other, ...RECEIPT }));
+    await claimWorkedExample(other);
+    ok(await svc.calculateShares({ event_id: other }));
+    await expect(svc.coverBill({ event_id: other, by_phone: PHONES.pranav })).rejects.toMatchObject({
+      code: "WRONG_STAGE",
+      message: expect.stringContaining("already went out"),
+    });
+  });
+
+  it("is refused before there's a dinner to pay for", async () => {
+    const { id } = await create();
+    await expect(svc.coverBill({ event_id: id, by_phone: PHONES.pranav })).rejects.toMatchObject({ code: "WRONG_STAGE" });
+  });
+});
+
 describe("people and status", () => {
   it("STOP: opts the friend out, tells the organizer, and blocks nudges", async () => {
     const { id } = await create();

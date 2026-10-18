@@ -16,6 +16,7 @@ import {
   seedToBooked,
   seedToClaiming,
   seedToPaying,
+  textsExcept,
   textsFromFo,
   textsToFo,
   toolEvents,
@@ -752,6 +753,59 @@ const noVenmo: EdgeCase = {
   ],
 };
 
+const MONEY = /\$\d|venmo|you owe|your share|pay (?:me|pranav|him|back)|split/i;
+
+const organizerCovers: EdgeCase = {
+  id: "organizer-covers",
+  title: "After dinner the organizer says it's their treat",
+  area: "payment",
+  planRef: "Payment: Organizer covers the bill",
+  critical: true,
+  seed: async (ctx) => {
+    const booked = await seedToBooked(ctx);
+    // Two and a half hours after the booked start: dinner is over, no receipt yet.
+    const startsAt = Date.parse(booked.slots[booked.chosenSlotId.charCodeAt(0) - 65]!.starts_at);
+    const minutes = Math.ceil((startsAt + 150 * 60_000 - ctx.now().getTime()) / 60_000);
+    if (minutes > 0) ctx.advanceMinutes(minutes);
+    return booked;
+  },
+  inbound: [{ from: "pranav", text: "That was a great dinner, thanks Fo!" }],
+  replies: [{ to: "pranav", when: /on you|your treat|cover|split/i, reply: "It's on me, don't charge anyone." }],
+  maxRuns: 4,
+  checks: [
+    {
+      description: "Fo asked the organizer whether to split or cover, before closing anything",
+      test: (h) => {
+        const asked = textsFromFo(h, "pranav").find((t) => /split/i.test(t.text) && /on you|your treat|cover/i.test(t.text));
+        if (!asked) return "no text to the organizer asking split or treat";
+        const covered = toolEvents(h, "cover_bill")[0];
+        return !covered || asked.index < covered.index || "cover_bill ran before the organizer was asked";
+      },
+    },
+    {
+      description: "cover_bill succeeded from the organizer's phone, in the organizer's run",
+      test: (h) => {
+        const org = organizerOf(h);
+        const ok = okCallsNamed(h, "cover_bill").some((c) => samePhone(c.args.by_phone, org.phone) && c.triggeredBy === org.id);
+        return ok || "no successful cover_bill with the organizer's phone";
+      },
+    },
+    {
+      description: "The dinner is settled as covered, with no split",
+      test: (h) =>
+        (h.finalEvent.stage === "settled" && h.finalEvent.organizerCovered === true && h.finalEvent.payments.length === 0) ||
+        `stage ${h.finalEvent.stage}, covered ${String(h.finalEvent.organizerCovered)}, ${h.finalEvent.payments.length} payment(s)`,
+    },
+    {
+      description: "No friend got a message about money",
+      test: (h) => {
+        const bad = textsExcept(h, "pranav").filter((t) => MONEY.test(t.text));
+        return bad.length === 0 || `money text to ${bad.map((t) => t.to).join(", ")}: ${bad[0]!.text}`;
+      },
+    },
+  ],
+};
+
 export const cases: EdgeCase[] = [
   receiptMismatch,
   tipAlreadyIncluded,
@@ -763,4 +817,5 @@ export const cases: EdgeCase[] = [
   saysPaid,
   paidInCash,
   noVenmo,
+  organizerCovers,
 ];

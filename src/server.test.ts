@@ -23,8 +23,10 @@ const CONTRACT_TOOLS = [
   "set_attendees",
   "record_claims",
   "calculate_shares",
+  "cover_bill",
   "mark_paid",
   "record_opt_out",
+  "get_playbook",
   "get_status",
 ];
 
@@ -55,6 +57,17 @@ describe("MCP server", () => {
     for (const t of tools) expect(t.description?.length).toBeGreaterThan(40);
     const create = tools.find((t) => t.name === "create_event");
     expect(create?.inputSchema.required).toEqual(expect.arrayContaining(["title", "organizer", "friends"]));
+    await client.close();
+  });
+
+  it("sends the short playbook on connect, and the full one from get_playbook", async () => {
+    const client = await inMemoryClient();
+    expect(client.getInstructions()).toContain("call get_playbook once");
+    const r = await client.callTool({ name: "get_playbook", arguments: {} });
+    const body = r.structuredContent as { ok: boolean; playbook: string };
+    expect(body.ok).toBe(true);
+    expect(body.playbook).toContain("# Fo Squad standing instructions");
+    expect(body.playbook).toContain("## Text or email");
     await client.close();
   });
 
@@ -145,6 +158,32 @@ describe("HTTP app", () => {
         params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "curl", version: "1" } },
       }),
     });
+
+  it("logs each request and tool call without the token or any arguments", async () => {
+    const lines: string[] = [];
+    const app = createApp({ service: newService(), token: "s3cret-path-token", log: (l) => lines.push(l) });
+    server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    expect((await initialize(base, "/mcp/s3cret-path-token")).status).toBe(200);
+    expect((await initialize(base, "/mcp/wrong")).status).toBe(401);
+    const call = await fetch(`${base}/mcp/s3cret-path-token`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "user-agent": "wajo-test" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get_status", arguments: { email: "lee@acme.com" } } }),
+    });
+    expect(call.status).toBe(200);
+    await call.text();
+    const all = lines.join("\n");
+    expect(all).toMatch(/POST \/mcp\/<token> initialize -> 200/);
+    expect(all).toMatch(/POST \/mcp\/<token> initialize -> 401/);
+    expect(all).toMatch(/tool get_status ok/);
+    expect(all).toMatch(/POST \/mcp\/<token> tools\/call get_status -> 200 \d+ms ua="wajo-test"/);
+    expect(all).not.toContain("s3cret-path-token");
+    expect(all).not.toContain("wrong");
+    expect(all).not.toContain("lee@acme.com");
+  });
 
   it("serves /health without a token", async () => {
     const base = await listen("s3cret");

@@ -78,7 +78,7 @@ const SERVICE_RECEIPT = {
 };
 
 describe("claims edge cases: shape", () => {
-  it("has the ten cases with unique kebab-case ids, run caps and cast-only senders", () => {
+  it("has the eleven cases with unique kebab-case ids, run caps and cast-only senders", () => {
     expect(cases.map((c) => c.id)).toEqual([
       "receipt-mismatch",
       "tip-already-included",
@@ -90,6 +90,7 @@ describe("claims edge cases: shape", () => {
       "says-paid-not-proof",
       "paid-in-cash",
       "no-venmo",
+      "organizer-covers",
     ]);
     expect(new Set(cases.map((c) => c.id)).size).toBe(cases.length);
     const ids = new Set(DEFAULT_PEOPLE.map((p) => p.id));
@@ -107,6 +108,7 @@ describe("claims edge cases: shape", () => {
       "double-claim-single-item",
       "messy-claim",
       "says-paid-not-proof",
+      "organizer-covers",
     ]);
   });
 });

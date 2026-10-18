@@ -129,3 +129,9 @@ Report: `sandbox-runs/edge-2026-10-18T00-10-17-081Z/summary.md`. Log: `sandbox-r
 All 29 cases in one run on the current code: `npx tsx src/sandbox/edge/cli.ts --model claude-opus-5-5 --concurrency 3 --max-usd 12`. **28/29 passed, 0 critical failures**, about $3.71 at list price. The only failure is dispute-total (the `get_status` tool gap above; parked for later). Each case ran once.
 
 Report: `sandbox-runs/edge-2026-10-18T00-21-08-958Z/summary.md`. Log: `sandbox-runs/edge-run-9-opus-all.log`.
+
+### Organizer covers the bill — Oct 17, 2026
+
+New `cover_bill` tool and after-dinner question ("Want me to split the bill, or is it on you?"), with a new critical case, organizer-covers. On claude-opus-5-5 (Claude Code backend), with two receipt cases as a regression check: **3/3 passed**, about $0.77 at list price. In organizer-covers, Fo asked the question after the organizer's thank-you, called `cover_bill` from the organizer's phone on "It's on me", and texted no friend about money.
+
+Report: `sandbox-runs/edge-2026-10-18T01-44-21-094Z/summary.md`. Log: `sandbox-runs/edge-run-10-cover-bill.log`.

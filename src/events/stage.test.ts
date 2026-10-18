@@ -32,6 +32,8 @@ const LEGAL: [Stage, Stage][] = [
   ["claiming", "paying"],
   ["paying", "claiming"],
   ["paying", "settled"],
+  ["booked", "settled"],
+  ["claiming", "settled"],
 ];
 
 describe("canTransition", () => {
@@ -61,7 +63,7 @@ describe("transition", () => {
     ["booked", "voting"],
     ["claiming", "planning"],
     ["claiming", "booked"],
-    ["claiming", "settled"],
+    ["voting", "settled"],
     ["paying", "booked"],
   ])("%s -> %s throws WRONG_STAGE", (from, to) => {
     expect(() => transition(eventAt(from), to, T1)).toThrow(FoError);

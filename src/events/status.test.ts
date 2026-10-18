@@ -263,10 +263,11 @@ describe("getStatus: booked", () => {
     );
   });
 
-  it("asks for the receipt after dinner", () => {
-    expect(getStatus(booked(), "2026-10-24T04:00:00.000Z").nextAction).toBe(
-      "After dinner, ask the organizer for the receipt photo, then call add_receipt.",
-    );
+  it("after dinner, asks the organizer whether to split or cover the bill", () => {
+    const next = getStatus(booked(), "2026-10-24T04:00:00.000Z").nextAction;
+    expect(next).toContain('"Want me to split the bill, or is it on you?"');
+    expect(next).toContain("Split: ask for the receipt photo, then call add_receipt.");
+    expect(next).toContain("Their treat: call cover_bill");
   });
 });
 

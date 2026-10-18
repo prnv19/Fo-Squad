@@ -75,7 +75,7 @@ Every event moves through these stages. `get_status` always returns the current 
 | Booked | Reservation confirmed, reminder scheduled |
 | Claiming | Receipt uploaded, collecting who had what |
 | Paying | Totals and Venmo links sent |
-| Settled | Everyone has paid |
+| Settled | Everyone has paid, or the organizer covered the bill |
 
 A receipt can be added from any stage before Paying, so a split-only night works without any planning.
 
@@ -98,8 +98,10 @@ The full contract, with every argument, is in [docs/tool-contract.md](docs/tool-
 | `set_attendees` | Claiming | Records who actually came |
 | `record_claims` | Claiming, Paying | Saves what one person had, in the format `Maya: 1, 4` (or `Maya: none`) |
 | `calculate_shares` | → Paying | Runs the split and builds each Venmo link and private message. `treated` and `split_evenly` need the organizer's `by_phone` or `by_email` |
+| `cover_bill` | Booked, Claiming → Settled | The organizer's treat: asked after dinner whether to split, they cover it. Closes the dinner with no split or payment requests |
 | `mark_paid` | Paying → Settled | `paid` from the organizer's phone or email, `says_paid` from the friend's own |
 | `record_opt_out` | All | Friend replied STOP |
+| `get_playbook` | All | The full standing instructions, for Fo to read before running a dinner |
 | `get_status` | All | Stage, who is pending and the next action. Finds an event by phone or email for replies to old threads |
 
 Errors come back as `{ ok: false, error: { code, message } }` with a message Fo can relay to the organizer.

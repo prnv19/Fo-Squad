@@ -277,4 +277,6 @@ export interface DinnerEvent {
   // Paying
   shares?: PersonShare[];
   payments: Payment[];
+  /** The organizer covered the whole bill (their treat): settled with no split and no payment requests. */
+  organizerCovered?: boolean;
 }

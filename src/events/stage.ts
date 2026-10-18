@@ -5,13 +5,14 @@ import { toIso } from "./util.js";
 /**
  * Forward moves plus one loop back: paying -> claiming for disputes.
  * Planning, voting and booked can all jump to claiming because a receipt can
- * arrive on a split-only night that never went through planning.
+ * arrive on a split-only night that never went through planning. Booked and
+ * claiming can jump to settled when the organizer covers the whole bill.
  */
 export const TRANSITIONS: Readonly<Record<Stage, readonly Stage[]>> = {
   planning: ["voting", "booked", "claiming"],
   voting: ["planning", "booked", "claiming"],
-  booked: ["planning", "claiming"],
-  claiming: ["paying"],
+  booked: ["planning", "claiming", "settled"],
+  claiming: ["paying", "settled"],
   paying: ["claiming", "settled"],
   settled: [],
 };

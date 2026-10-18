@@ -22,7 +22,21 @@ export interface AppOptions {
   runnerHealth?: () => RunnerHealth;
   /** FO_RUNNER_DRY=1 only: POST /runner/dry/inbound { from, text } fakes a text to Fo. */
   dryRun?: DryRunHooks;
+  /** One line per MCP request and tool call. Never the token, arguments or results. */
+  log?: (line: string) => void;
 }
+
+/** "tools/call get_status", "initialize", or "batch of 3" from a JSON-RPC body. */
+function describeRpc(body: unknown): string {
+  const one = (m: unknown): string => {
+    const msg = (m ?? {}) as { method?: unknown; params?: { name?: unknown } };
+    const method = typeof msg.method === "string" ? msg.method : "response";
+    return method === "tools/call" && typeof msg.params?.name === "string" ? `${method} ${msg.params.name}` : method;
+  };
+  return Array.isArray(body) ? `batch of ${body.length} (${body.map(one).join(", ")})` : one(body);
+}
+
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 /** Bad configuration: printed as one plain line at startup, without a stack trace. */
 export class StartupError extends Error {}
@@ -64,10 +78,24 @@ function jsonRpcError(res: Response, status: number, code: number, message: stri
   res.status(status).json({ jsonrpc: "2.0", error: { code, message }, id: null });
 }
 
-export function createApp({ service, token, runnerHealth, dryRun }: AppOptions): Express {
+export function createApp({ service, token, runnerHealth, dryRun, log }: AppOptions): Express {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "1mb" }));
+
+  if (log) {
+    // Who's calling and with what, so a connection from Fo is visible. The path
+    // token is replaced before logging; bodies are reduced to method names.
+    app.use(["/mcp", "/mcp/:token"], (req, res, next) => {
+      const started = Date.now();
+      res.on("finish", () => {
+        const path = req.params.token !== undefined || req.path !== "/" ? "/mcp/<token>" : "/mcp";
+        const ua = clip(String(req.headers["user-agent"] ?? "-"), 80);
+        log(`${req.method} ${path} ${req.method === "POST" ? describeRpc(req.body) : "-"} -> ${res.statusCode} ${Date.now() - started}ms ua="${ua}"`);
+      });
+      next();
+    });
+  }
 
   app.get("/health", (_req, res) => {
     res.json(runnerHealth ? { ok: true, runner: runnerHealth() } : { ok: true });
@@ -89,7 +117,7 @@ export function createApp({ service, token, runnerHealth, dryRun }: AppOptions):
   };
 
   const handleMcp = async (req: Request, res: Response): Promise<void> => {
-    const server = createMcpServer(service);
+    const server = createMcpServer(service, log ? { log } : {});
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       void transport.close();
@@ -158,7 +186,8 @@ async function main(): Promise<void> {
     );
   }
 
-  const app = createApp({ service, runnerHealth, ...(dryRun ? { dryRun } : {}), ...(token ? { token } : {}) });
+  const log = (line: string) => console.error(`[fo-squad] ${new Date().toISOString()} ${line}`);
+  const app = createApp({ service, runnerHealth, log, ...(dryRun ? { dryRun } : {}), ...(token ? { token } : {}) });
   app.listen(port, (err?: Error) => {
     if (err) {
       console.error("[fo-squad] failed to start:", err);

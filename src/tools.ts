@@ -6,6 +6,7 @@
 
 import { z } from "zod";
 import { isFoError } from "./events/index.js";
+import { readPlaybook } from "./playbook.js";
 import type { FoSquadService, ToolResult } from "./service.js";
 
 export interface ToolDef {
@@ -257,6 +258,19 @@ export const TOOLS: readonly ToolDef[] = [
     run: (service, args) => service.calculateShares(args),
   }),
   defineTool({
+    name: "cover_bill",
+    title: "Organizer covers the bill",
+    description:
+      "Call when the organizer, asked after the dinner whether to split the bill, says it's their treat. Organizer only (by_phone or by_email). Closes the dinner with no split and no payment requests; works before or after add_receipt, but not once totals went out.",
+    inputShape: {
+      event_id: eventId,
+      by_phone: byPhone("Must be the organizer's number.").optional(),
+      by_email: byEmail("Must be the organizer's email.").optional(),
+    },
+    sender: "required",
+    run: (service, args) => service.coverBill(args),
+  }),
+  defineTool({
     name: "mark_paid",
     title: "Mark a payment",
     description:
@@ -279,6 +293,14 @@ export const TOOLS: readonly ToolDef[] = [
     run: (service, args) => service.recordOptOut(args),
   }),
   defineTool({
+    name: "get_playbook",
+    title: "Read the rules",
+    description:
+      "Call once before you start or continue any dinner or lunch, and follow what it says. Returns the full standing instructions: every stage, message templates, timers, and how to handle disputes, opt-outs and texts versus emails.",
+    inputShape: {},
+    run: async () => ({ ok: true, playbook: readPlaybook() }),
+  }),
+  defineTool({
     name: "get_status",
     title: "Where things stand",
     description:
@@ -292,6 +314,9 @@ export const TOOLS: readonly ToolDef[] = [
   }),];
 
 export const TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
+
+/** Every tool but get_playbook, for callers that already put the playbook in the model's prompt (runner, sandbox). */
+export const WORK_TOOLS: readonly ToolDef[] = TOOLS.filter((t) => t.name !== "get_playbook");
 
 export function getTool(name: string): ToolDef | undefined {
   return TOOLS.find((t) => t.name === name);

@@ -13,7 +13,7 @@ import { z } from "zod";
 import { MemoryStore, tryNormalizePhone, type EventStore } from "../events/index.js";
 import { escapeUntrusted } from "../runner/prompt.js";
 import { FoSquadService } from "../service.js";
-import { runServiceCall, TOOLS, type ToolDef } from "../tools.js";
+import { runServiceCall, WORK_TOOLS, type ToolDef } from "../tools.js";
 import { runClaudeCodeTurn } from "./claudeCode.js";
 import { SimClock } from "./clock.js";
 import type { SandboxBus } from "./events.js";
@@ -523,7 +523,7 @@ export function createFoCoordinator(opts: CoordinatorOptions): FoCoordinator {
     };
   };
 
-  const customTools = [...TOOLS.map(foSquadTool), sendText, scheduleAction, callRestaurant, readReceipt].map(observed);
+  const customTools = [...WORK_TOOLS.map(foSquadTool), sendText, scheduleAction, callRestaurant, readReceipt].map(observed);
   const tools: RunnerParams["tools"] = [...customTools, webSearch];
 
   // ---------- one coordinator run ----------

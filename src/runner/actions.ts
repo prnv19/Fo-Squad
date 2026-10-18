@@ -7,7 +7,7 @@
 import { z } from "zod";
 import { isOrganizerContact, resolvePerson, tryNormalizePhone, type EventStore } from "../events/index.js";
 import type { FoSquadService, ToolResult } from "../service.js";
-import { runServiceCall, TOOLS, type ToolDef } from "../tools.js";
+import { runServiceCall, WORK_TOOLS, type ToolDef } from "../tools.js";
 import type { DinnerEvent, Person } from "../types.js";
 import type { FoClient, FoReply, RunContext, RunnerState } from "./types.js";
 
@@ -436,7 +436,7 @@ function foTaskAction(ctx: RunContext, deps: ActionDeps, fo: ReturnType<typeof c
 export function buildActions(ctx: RunContext, deps: ActionDeps): Action[] {
   const fo = createFo(ctx, deps);
   return [
-    ...TOOLS.map((tool) => registryAction(tool, ctx, deps)),
+    ...WORK_TOOLS.map((tool) => registryAction(tool, ctx, deps)),
     sendTextsAction(ctx, deps, fo),
     foTaskAction(ctx, deps, fo),
   ];
