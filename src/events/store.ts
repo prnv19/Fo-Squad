@@ -4,14 +4,14 @@ import path from "node:path";
 import type { Concession, DinnerEvent } from "../types.js";
 import { FoError } from "./errors.js";
 import { isValidEventId } from "./ids.js";
-import { tryNormalizePhone } from "./people.js";
+import { contactsOf, tryNormalizeContact } from "./people.js";
 
 export interface EventStore {
   get(id: string): Promise<DinnerEvent | undefined>;
   put(event: DinnerEvent): Promise<void>;
   list(): Promise<DinnerEvent[]>;
-  /** Most recently updated non-settled event that includes this phone number. */
-  findActiveByPhone(phone: string): Promise<DinnerEvent | undefined>;
+  /** Most recently updated non-settled event that includes this phone number or email. */
+  findActiveByContact(contact: string): Promise<DinnerEvent | undefined>;
   getConcessions(): Promise<Concession[]>;
   putConcessions(concessions: Concession[]): Promise<void>;
 }
@@ -22,12 +22,12 @@ function assertEventId(id: string): void {
   }
 }
 
-function pickActiveByPhone(events: DinnerEvent[], phone: string): DinnerEvent | undefined {
-  const normalized = tryNormalizePhone(phone);
+function pickActiveByContact(events: DinnerEvent[], contact: string): DinnerEvent | undefined {
+  const normalized = tryNormalizeContact(contact);
   if (!normalized) return undefined;
   let best: DinnerEvent | undefined;
   for (const e of events) {
-    if (e.stage === "settled" || !e.people.some((p) => p.phone === normalized)) continue;
+    if (e.stage === "settled" || !e.people.some((p) => contactsOf(p).includes(normalized))) continue;
     const diff = best ? Date.parse(e.updatedAt) - Date.parse(best.updatedAt) : 1;
     if (!best || diff > 0 || (diff === 0 && Date.parse(e.createdAt) > Date.parse(best.createdAt))) {
       best = e;
@@ -56,8 +56,8 @@ export class MemoryStore implements EventStore {
     return [...this.events.values()].map((e) => structuredClone(e));
   }
 
-  async findActiveByPhone(phone: string): Promise<DinnerEvent | undefined> {
-    const e = pickActiveByPhone([...this.events.values()], phone);
+  async findActiveByContact(contact: string): Promise<DinnerEvent | undefined> {
+    const e = pickActiveByContact([...this.events.values()], contact);
     return e ? structuredClone(e) : undefined;
   }
 
@@ -137,12 +137,14 @@ export class FileStore implements EventStore {
     return events;
   }
 
-  async findActiveByPhone(phone: string): Promise<DinnerEvent | undefined> {
-    return pickActiveByPhone(await this.list(), phone);
+  async findActiveByContact(contact: string): Promise<DinnerEvent | undefined> {
+    return pickActiveByContact(await this.list(), contact);
   }
 
   async getConcessions(): Promise<Concession[]> {
-    return (await this.readJson<Concession[]>(this.concessionsFile)) ?? [];
+    // Files written before email support keyed concessions by `phone`.
+    const stored = (await this.readJson<(Concession & { phone?: string })[]>(this.concessionsFile)) ?? [];
+    return stored.map(({ phone, ...c }) => ({ ...c, contact: c.contact ?? phone ?? "" }));
   }
 
   async putConcessions(concessions: Concession[]): Promise<void> {

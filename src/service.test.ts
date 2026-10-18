@@ -126,10 +126,10 @@ describe("the full plan story", () => {
     const { r: created, id } = await create();
     expect(created).toMatchObject({ ok: true, stage: "planning" });
     expect(created.people).toHaveLength(6);
-    expect(created.people).toContainEqual({ id: "maya", name: "Maya", phone: PHONES.maya, is_organizer: false });
+    expect(created.people).toContainEqual({ id: "maya", name: "Maya", phone: PHONES.maya, channel: "text", is_organizer: false });
     expect(created.time_slots).toEqual(SLOTS.map((s, i) => ({ id: "ABCD"[i], ...s })));
     expect(created.confirm_with_organizer).toContain(`Maya (${PHONES.maya})`);
-    expect(created.next_action).toMatch(/^Confirm the list with the organizer before texting anyone/);
+    expect(created.next_action).toMatch(/^Confirm the list with the organizer before messaging anyone/);
 
     // Waiting on people, before the deadline: pick_time doesn't decide.
     ok(await svc.recordPreferences({ event_id: id, person: "Maya", slot_ids: ["B", "C"], cuisines: ["Italian", "Thai"], dietary: ["Vegetarian"] }));
@@ -153,7 +153,7 @@ describe("the full plan story", () => {
     expect(afterPick?.chosenCuisine).toBe("italian");
     // Priya named only Thai, so she gave up her cuisine and gets priority next time.
     expect(await store.getConcessions()).toEqual([
-      { phone: PHONES.priya, eventId: id, what: "cuisine", at: T0 },
+      { contact: PHONES.priya, eventId: id, what: "cuisine", at: T0 },
     ]);
 
     const voting = await svc.getStatus({ event_id: id });
@@ -168,7 +168,7 @@ describe("the full plan story", () => {
       ask_organizer: "Luigi's won 4 to 2. Book Sat 7:30pm for 6?",
     });
     expect((tally.runner_ups as { name: string }[])[0]?.name).toBe("Osteria Marco");
-    expect((await store.getConcessions()).filter((c) => c.what === "restaurant").map((c) => c.phone)).toEqual([
+    expect((await store.getConcessions()).filter((c) => c.what === "restaurant").map((c) => c.contact)).toEqual([
       PHONES.priya,
       PHONES.alex,
     ]);
@@ -257,7 +257,7 @@ describe("planning rules", () => {
     const organizer = status.organizer as { name: string; phone: string };
     const created = await store.get(id);
     const expected = created!.people.find((p) => p.isOrganizer)!;
-    expect(organizer).toEqual({ id: expected.id, name: expected.name, phone: expected.phone });
+    expect(organizer).toEqual({ id: expected.id, name: expected.name, phone: expected.phone, channel: "text" });
     const people = status.people as { name: string; phone: string }[];
     expect(people.map((p) => p.name)).toEqual(created!.people.map((p) => p.name));
     expect(people.every((p) => p.phone.startsWith("+"))).toBe(true);
@@ -337,7 +337,7 @@ describe("planning rules", () => {
     expect((await store.get(id))?.preferences.find((p) => p.personId === "maya")?.dietary).toEqual(["vegetarian"]);
     const second = ok(await svc.pickTime({ event_id: id }));
     expect(second).toMatchObject({ decided: true, status: "majority", slot: { id: "B", label: "Tue 7pm" }, cant_make: ["Alex"], party_size: 5 });
-    expect(await store.getConcessions()).toContainEqual({ phone: PHONES.alex, eventId: id, what: "time slot", at: "2026-10-17T19:00:00.000Z" });
+    expect(await store.getConcessions()).toContainEqual({ contact: PHONES.alex, eventId: id, what: "time slot", at: "2026-10-17T19:00:00.000Z" });
   });
 
   it("moves back to planning when slots change during voting", async () => {
@@ -448,7 +448,7 @@ describe("security", () => {
     const { id } = await create({ slots: false });
     await svc.addReceipt({ event_id: id, ...RECEIPT });
     await claimWorkedExample(id);
-    await expect(svc.calculateShares({ event_id: id, treated: ["Maya"] })).rejects.toMatchObject({ code: "NOT_ORGANIZER" });
+    await expect(svc.calculateShares({ event_id: id, treated: ["Maya"] })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     await expect(svc.calculateShares({ event_id: id, treated: ["Maya"], by_phone: PHONES.jordan })).rejects.toMatchObject({
       code: "NOT_ORGANIZER",
     });

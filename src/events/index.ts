@@ -3,13 +3,21 @@ export { generateEventId, isValidEventId } from "./ids.js";
 export {
   assertCanText,
   assertOrganizer,
-  assertUniquePhones,
+  assertUniqueContacts,
+  channelOf,
+  contactLabel,
+  contactsOf,
   getOrganizer,
-  isOrganizerPhone,
+  hasContact,
+  isOrganizerContact,
+  normalizeEmail,
   normalizePhone,
+  primaryContact,
   requirePerson,
   resolvePerson,
   slugId,
+  tryNormalizeContact,
+  tryNormalizeEmail,
   tryNormalizePhone,
 } from "./people.js";
 export {

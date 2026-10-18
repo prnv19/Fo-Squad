@@ -9,7 +9,10 @@
 //   --critical       run only must-work-before-demo cases
 //   --concurrency 3  cases at once (each has its own store and clock)
 //   --max-usd 25     stop starting cases once finished ones cost this much
-//   --model <id>     default claude-opus-5-5 (or SANDBOX_MODEL)
+//   --backend <b>    claude-code (default: Claude Code's login, no API key) or
+//                    api (ANTHROPIC_API_KEY); or SANDBOX_BACKEND
+//   --model <id>     default claude-haiku-5-5 on claude-code, claude-opus-5-5
+//                    on api (or SANDBOX_MODEL)
 //   --list           print the selected cases and exit (free)
 //
 // Also runs as `node --env-file=.env --import tsx src/sandbox/edge/cli.ts`.
@@ -18,8 +21,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import Anthropic from "@anthropic-ai/sdk";
-import { hasAnthropicCredentials } from "../cli.js";
-import { DEFAULT_SANDBOX_MODEL } from "../engine.js";
+import { defaultModel, hasAnthropicCredentials, parseBackend } from "../cli.js";
+import type { SandboxBackend } from "../engine.js";
 import { SandboxBus } from "../events.js";
 import { runEdgeCase, runSuite, type EdgeCaseResult } from "./harness.js";
 import { EDGE_AREAS, selectCases, type CaseFilter } from "./index.js";
@@ -30,6 +33,7 @@ export interface EdgeCliOptions {
   filter: CaseFilter;
   concurrency: number;
   maxUsd: number;
+  backend: SandboxBackend;
   model: string;
   list: boolean;
   viewer: boolean;
@@ -44,6 +48,7 @@ export function parseEdgeArgs(argv: string[], env: NodeJS.ProcessEnv = process.e
       critical: { type: "boolean", default: false },
       concurrency: { type: "string" },
       "max-usd": { type: "string" },
+      backend: { type: "string" },
       model: { type: "string" },
       list: { type: "boolean", default: false },
       viewer: { type: "boolean", default: false },
@@ -59,6 +64,7 @@ export function parseEdgeArgs(argv: string[], env: NodeJS.ProcessEnv = process.e
     if (!raw.trim() || !Number.isFinite(n) || n <= 0) throw new Error(`${flag} must be a positive number`);
     return n;
   };
+  const backend = parseBackend(values.backend ?? env.SANDBOX_BACKEND);
   const only = values.only?.split(",").map((s) => s.trim()).filter(Boolean);
   return {
     filter: {
@@ -68,7 +74,8 @@ export function parseEdgeArgs(argv: string[], env: NodeJS.ProcessEnv = process.e
     },
     concurrency: Math.floor(number(values.concurrency, "--concurrency", 3)),
     maxUsd: number(values["max-usd"], "--max-usd", 25),
-    model: values.model?.trim() || env.SANDBOX_MODEL?.trim() || DEFAULT_SANDBOX_MODEL,
+    backend,
+    model: values.model?.trim() || env.SANDBOX_MODEL?.trim() || defaultModel(backend),
     list: values.list ?? false,
     viewer: values.viewer ?? false,
   };
@@ -99,19 +106,20 @@ async function main(): Promise<number> {
     return 0;
   }
   if (opts.viewer) console.log("No live viewer for the suite; each case gets an HTML replay in the run folder.");
-  if (!hasAnthropicCredentials(process.env)) {
+  if (opts.backend === "api" && !hasAnthropicCredentials(process.env)) {
     console.error("No Anthropic credentials found. Set ANTHROPIC_API_KEY or run `ant auth login`, then try again.");
     return 1;
   }
 
-  const anthropic = new Anthropic({ ...(process.env.ANTHROPIC_API_KEY?.trim() ? { apiKey: process.env.ANTHROPIC_API_KEY.trim() } : {}) });
+  const anthropic =
+    opts.backend === "api" ? new Anthropic({ ...(process.env.ANTHROPIC_API_KEY?.trim() ? { apiKey: process.env.ANTHROPIC_API_KEY.trim() } : {}) }) : undefined;
   const startedAt = new Date();
-  console.log(`Running ${cases.length} edge case(s), ${opts.concurrency} at a time, cost cap $${opts.maxUsd.toFixed(2)}, model ${opts.model}.`);
+  console.log(`Running ${cases.length} edge case(s), ${opts.concurrency} at a time, cost cap $${opts.maxUsd.toFixed(2)}, model ${opts.model} via ${opts.backend}.`);
 
   const suite = await runSuite(cases, {
     concurrency: opts.concurrency,
     maxUsd: opts.maxUsd,
-    runCase: (c) => runEdgeCase(c, { anthropic, bus: new SandboxBus(), model: opts.model }),
+    runCase: (c) => runEdgeCase(c, { ...(anthropic ? { anthropic } : {}), backend: opts.backend, bus: new SandboxBus(), model: opts.model }),
     onResult: (r, progress) => {
       for (const line of formatResultLine(r, progress)) console.log(line);
     },

@@ -40,10 +40,13 @@ describe("tool registry", () => {
   it("marks which tools carry by_phone, and whether it's required", () => {
     const withByPhone = TOOLS.filter((t) => "by_phone" in t.inputShape).map((t) => t.name);
     expect(withByPhone.sort()).toEqual(["calculate_shares", "confirm_booking", "mark_paid", "update_event"]);
-    const required = (name: string) => !z.safeParse(getTool(name)!.inputShape.by_phone!, undefined).success;
-    expect(required("mark_paid")).toBe(true);
-    expect(required("confirm_booking")).toBe(true);
-    expect(required("calculate_shares")).toBe(false);
+    // by_email stands in for by_phone on an email, so whether one is needed is declared, not in the schema.
+    for (const name of withByPhone) expect("by_email" in getTool(name)!.inputShape, name).toBe(true);
+    expect(TOOLS.filter((t) => t.sender).map((t) => t.name).sort()).toEqual(withByPhone.sort());
+    expect(getTool("mark_paid")!.sender).toBe("required");
+    expect(getTool("confirm_booking")!.sender).toBe("required");
+    expect(getTool("update_event")!.sender).toBe("required");
+    expect(getTool("calculate_shares")!.sender).toBe("optional");
   });
 
   it("runs the service and maps FoErrors to a relayable result", async () => {

@@ -5,7 +5,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryStore } from "./events/index.js";
-import { createApp } from "./index.js";
+import { createApp, MIN_TOKEN_LENGTH, readToken } from "./index.js";
 import { createMcpServer } from "./server.js";
 import { FoSquadService } from "./service.js";
 
@@ -95,6 +95,26 @@ describe("MCP server", () => {
     const r = await client.callTool({ name: "pick_time", arguments: { force: "yes" } });
     expect(r.isError).toBe(true);
     await client.close();
+  });
+});
+
+describe("startup token", () => {
+  const strong = "a".repeat(MIN_TOKEN_LENGTH);
+
+  it("refuses to run the HTTP server without a token", () => {
+    expect(() => readToken({})).toThrow(/FO_SQUAD_TOKEN is required/);
+    expect(() => readToken({ FO_SQUAD_TOKEN: "   " })).toThrow(/FO_SQUAD_TOKEN is required/);
+  });
+
+  it("refuses weak or URL-unsafe tokens", () => {
+    expect(() => readToken({ FO_SQUAD_TOKEN: "s3cret" })).toThrow(/at least 32 characters/);
+    expect(() => readToken({ FO_SQUAD_TOKEN: `${strong}/x` })).toThrow(/letters, digits/);
+  });
+
+  it("accepts a strong token, and runs open only with the explicit local-development opt-out", () => {
+    expect(readToken({ FO_SQUAD_TOKEN: ` ${strong} ` })).toBe(strong);
+    expect(readToken({ FO_SQUAD_ALLOW_NO_TOKEN: "1" })).toBeUndefined();
+    expect(() => readToken({ FO_SQUAD_ALLOW_NO_TOKEN: "true" })).toThrow(/FO_SQUAD_TOKEN is required/);
   });
 });
 

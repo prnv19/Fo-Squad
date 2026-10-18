@@ -24,6 +24,34 @@ export interface AppOptions {
   dryRun?: DryRunHooks;
 }
 
+/** Bad configuration: printed as one plain line at startup, without a stack trace. */
+export class StartupError extends Error {}
+
+/** 32+ characters: `openssl rand -hex 32` gives 64. */
+export const MIN_TOKEN_LENGTH = 32;
+
+/**
+ * The token /mcp requires. The HTTP server fails closed: no token (or a weak
+ * one) is a startup error, unless FO_SQUAD_ALLOW_NO_TOKEN=1 for local
+ * development. URL-safe characters only, since it may travel as a path segment.
+ */
+export function readToken(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const token = env.FO_SQUAD_TOKEN?.trim();
+  if (token) {
+    if (token.length < MIN_TOKEN_LENGTH) {
+      throw new StartupError(`FO_SQUAD_TOKEN must be at least ${MIN_TOKEN_LENGTH} characters. Generate one with: openssl rand -hex 32`);
+    }
+    if (!/^[A-Za-z0-9._~-]+$/.test(token)) {
+      throw new StartupError("FO_SQUAD_TOKEN may only use letters, digits and . _ ~ - (it can appear in the URL). Generate one with: openssl rand -hex 32");
+    }
+    return token;
+  }
+  if (env.FO_SQUAD_ALLOW_NO_TOKEN?.trim() === "1") return undefined;
+  throw new StartupError(
+    "FO_SQUAD_TOKEN is required: without it anyone could read and change every dinner. Generate one with: openssl rand -hex 32. For local development only, FO_SQUAD_ALLOW_NO_TOKEN=1 runs without one.",
+  );
+}
+
 /** Constant-time compare so the token can't be guessed one character at a time. */
 function tokenMatches(given: string | undefined, expected: string): boolean {
   if (given === undefined) return false;
@@ -113,7 +141,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const token = process.env.FO_SQUAD_TOKEN?.trim() || undefined;
+  const token = readToken(); // throws a clear message when missing or weak
   const port = Number(process.env.PORT) || 3000;
 
   // Same process as the MCP server, so the runner shares the store and the per-event locks.
@@ -137,7 +165,8 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     const store = process.env.DATA_DIR?.trim() ? `files in ${process.env.DATA_DIR}` : "memory (lost on restart)";
-    console.error(`[fo-squad] listening on :${port}, POST /mcp${token ? " (bearer token required)" : ""}, store: ${store}`);
+    const access = token ? "token required" : "NO TOKEN: open to anyone who can reach it (FO_SQUAD_ALLOW_NO_TOKEN=1, local development only)";
+    console.error(`[fo-squad] listening on :${port}, POST /mcp (${access}), store: ${store}`);
   });
 }
 
@@ -153,7 +182,7 @@ function isMain(): boolean {
 
 if (isMain()) {
   main().catch((err) => {
-    console.error("[fo-squad] fatal:", err);
+    console.error("[fo-squad] fatal:", err instanceof StartupError ? err.message : err);
     process.exit(1);
   });
 }

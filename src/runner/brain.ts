@@ -209,7 +209,7 @@ export class ClaudeBrain implements Brain {
     if (t.eventId) return t.eventId;
     if (!ctx.actorPhone) return undefined;
     try {
-      return (await this.store.findActiveByPhone(ctx.actorPhone))?.id;
+      return (await this.store.findActiveByContact(ctx.actorPhone))?.id;
     } catch {
       return undefined;
     }

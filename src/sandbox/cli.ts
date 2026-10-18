@@ -7,14 +7,17 @@
 // SANDBOX_VIEWER=1 + SANDBOX_PORT (default 4321), SANDBOX_SPEED (simulated
 // seconds per real second; default 3600 with the viewer, otherwise no pacing),
 // SANDBOX_MAX_TURNS (default 60), SANDBOX_BUDGET_MIN (wall-clock cap, default
-// 90), SANDBOX_MODEL (default claude-opus-5-5).
+// 90), SANDBOX_BACKEND (claude-code, the default: Claude Code's login, no API
+// key; or api), SANDBOX_MODEL (default claude-haiku-5-5 on claude-code,
+// claude-opus-5-5 on api).
 
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
-import { runSandbox } from "./engine.js";
+import { DEFAULT_CLAUDE_CODE_MODEL } from "./claudeCode.js";
+import { DEFAULT_SANDBOX_MODEL, runSandbox, type SandboxBackend } from "./engine.js";
 import { SandboxBus, type SandboxEvent } from "./events.js";
 import { createPrinter } from "./printer.js";
 import { defaultScenario } from "./scenario.js";
@@ -34,6 +37,16 @@ export function hasAnthropicCredentials(env: NodeJS.ProcessEnv = process.env): b
   }
 }
 
+export function parseBackend(raw: string | undefined): SandboxBackend {
+  const v = raw?.trim() || "claude-code";
+  if (v !== "api" && v !== "claude-code") throw new Error(`backend must be claude-code or api, not "${v}"`);
+  return v;
+}
+
+export function defaultModel(backend: SandboxBackend): string {
+  return backend === "claude-code" ? DEFAULT_CLAUDE_CODE_MODEL : DEFAULT_SANDBOX_MODEL;
+}
+
 function positiveNumber(raw: string | undefined, fallback: number): number {
   const n = Number(raw);
   return raw?.trim() && Number.isFinite(n) && n > 0 ? n : fallback;
@@ -41,7 +54,14 @@ function positiveNumber(raw: string | undefined, fallback: number): number {
 
 async function main(): Promise<number> {
   const env = process.env;
-  if (!hasAnthropicCredentials(env)) {
+  let backend: SandboxBackend;
+  try {
+    backend = parseBackend(env.SANDBOX_BACKEND);
+  } catch (err) {
+    console.error(`SANDBOX_BACKEND: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+  if (backend === "api" && !hasAnthropicCredentials(env)) {
     console.error(
       "No Anthropic credentials found. Set ANTHROPIC_API_KEY or run `ant auth login`, then try again.\nThe sandbox calls Claude (it plays Fo) and uses real web search, so it needs an API credential.",
     );
@@ -66,19 +86,20 @@ async function main(): Promise<number> {
     }
   }
 
-  const anthropic = new Anthropic({ ...(env.ANTHROPIC_API_KEY?.trim() ? { apiKey: env.ANTHROPIC_API_KEY.trim() } : {}) });
+  const model = env.SANDBOX_MODEL?.trim() || defaultModel(backend);
   const result = await runSandbox({
     scenario,
-    anthropic,
+    backend,
+    ...(backend === "api" ? { anthropic: new Anthropic({ ...(env.ANTHROPIC_API_KEY?.trim() ? { apiKey: env.ANTHROPIC_API_KEY.trim() } : {}) }) } : {}),
     bus,
-    ...(env.SANDBOX_MODEL?.trim() ? { model: env.SANDBOX_MODEL.trim() } : {}),
+    model,
     maxCoordinatorTurns: positiveNumber(env.SANDBOX_MAX_TURNS, 60),
     wallClockBudgetMs: positiveNumber(env.SANDBOX_BUDGET_MIN, 90) * 60_000,
     speed: positiveNumber(env.SANDBOX_SPEED, viewerOn ? 3600 : Infinity),
   });
 
   await saveReport(bus.history);
-  console.log(`Estimated cost: $${result.estimatedUsd.toFixed(2)} (estimate: list prices for ${env.SANDBOX_MODEL?.trim() || "claude-opus-5-5"}, not a bill)`);
+  console.log(`Estimated cost: $${result.estimatedUsd.toFixed(2)} (estimate: list prices for ${model}, not a bill${backend === "claude-code" ? "; on a Claude subscription it counts toward plan usage" : ""})`);
 
   if (closeViewer) {
     console.log("Viewer still running so you can look around. Press Ctrl+C to exit.");

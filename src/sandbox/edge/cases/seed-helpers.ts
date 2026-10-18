@@ -374,8 +374,8 @@ export function organizerOf(h: CaseHistory): Person {
   return p;
 }
 
-export function samePhone(raw: unknown, phone: string): boolean {
-  return typeof raw === "string" && (tryNormalizePhone(raw) ?? raw) === phone;
+export function samePhone(raw: unknown, phone: string | undefined): boolean {
+  return !!phone && typeof raw === "string" && (tryNormalizePhone(raw) ?? raw) === phone;
 }
 
 /** Whether a `person` arg (id, name or phone) refers to this person. */

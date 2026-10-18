@@ -20,7 +20,7 @@ function makeEvent(id: string, phones: string[] = ["5551230001"], now = T0): Din
   );
 }
 
-const concessions: Concession[] = [{ phone: "+15551230001", eventId: "a", what: "cuisine: thai", at: T0 }];
+const concessions: Concession[] = [{ contact: "+15551230001", eventId: "a", what: "cuisine: thai", at: T0 }];
 
 let tmp: string;
 beforeEach(async () => {
@@ -66,17 +66,17 @@ describe.each(stores)("%s", (_name, make) => {
     expect(await store.getConcessions()).toEqual(concessions);
   });
 
-  it("findActiveByPhone picks the latest non-settled event with that phone", async () => {
+  it("findActiveByContact picks the latest non-settled event with that phone", async () => {
     const store = make();
     await store.put(makeEvent("old", ["5551230001"], "2026-10-01T00:00:00.000Z"));
     await store.put({ ...makeEvent("newer", ["5551230001"], "2026-10-10T00:00:00.000Z") });
     await store.put({ ...makeEvent("newest-settled", ["5551230001"], "2026-10-15T00:00:00.000Z"), stage: "settled" });
     await store.put(makeEvent("other", ["5559990000"], "2026-10-16T00:00:00.000Z"));
-    expect((await store.findActiveByPhone("(555) 123-0001"))?.id).toBe("newer");
+    expect((await store.findActiveByContact("(555) 123-0001"))?.id).toBe("newer");
     // The organizer is in every event, so their latest active one wins.
-    expect((await store.findActiveByPhone("+15550001111"))?.id).toBe("other");
-    expect(await store.findActiveByPhone("5557777777")).toBeUndefined();
-    expect(await store.findActiveByPhone("garbage")).toBeUndefined();
+    expect((await store.findActiveByContact("+15550001111"))?.id).toBe("other");
+    expect(await store.findActiveByContact("5557777777")).toBeUndefined();
+    expect(await store.findActiveByContact("garbage")).toBeUndefined();
   });
 
   it.each(["../escape", "a/b", "..", "", "x".repeat(65), "evt.json", "a\\b", "%2e%2e"])(

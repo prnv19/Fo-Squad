@@ -182,7 +182,12 @@ export function roundMarkers(events: DinnerEvent[], state: RunnerState, now: Dat
 
 // ---------- Rules ----------
 
-function recipient(p: Person): ScheduledSend["to"][number] {
+/** The relay only texts: people reached by email are left to Fo. */
+function textable(p: Person | undefined): p is Person & { phone: string } {
+  return !!p && !!p.phone && !p.optedOut;
+}
+
+function recipient(p: Person & { phone: string }): ScheduledSend["to"][number] {
   return { personId: p.id, name: p.name, phone: p.phone };
 }
 
@@ -248,7 +253,7 @@ function roundWork(event: DinnerEvent, round: Round, now: Date, out: DueWork): v
   if (nudgeAfter !== undefined && deadlineIso && now.getTime() >= nudgeAfter) {
     for (const id of rs.toNudge) {
       const person = event.people.find((p) => p.id === id);
-      if (!person || person.optedOut) continue;
+      if (!textable(person)) continue;
       out.sends.push({
         eventId: event.id,
         key: `${event.id}:nudge:${round.stage}:${deadlineIso}:${person.id}`,
@@ -281,7 +286,7 @@ function bookedWork(event: DinnerEvent, now: Date, opts: TimerOptions, out: DueW
   const remindAt = Math.max(starts.getTime() - DAY_OF_LEAD_MS, earliest.getTime());
   // A reminder after the table time is useless, so a missed one is dropped.
   if (nowMs >= remindAt && nowMs < starts.getTime()) {
-    const going = event.people.filter((p) => !p.optedOut && canMakeSlot(event, p, booking.slotId));
+    const going = event.people.filter((p) => textable(p) && canMakeSlot(event, p, booking.slotId)).filter(textable);
     if (going.length > 0) {
       const when = sameLocalDay(now, starts, opts.timeZone)
         ? local.hour >= 17
@@ -309,7 +314,7 @@ function payingWork(event: DinnerEvent, now: Date, out: DueWork): void {
   for (const pay of event.payments) {
     if (pay.status !== "pending" || pay.amountCents <= 0) continue;
     const person = event.people.find((p) => p.id === pay.personId);
-    if (!person || person.optedOut || person.id === event.organizerId) continue;
+    if (!textable(person) || person.id === event.organizerId) continue;
     // calculate_shares stamps updatedAt on a new or changed amount, and only
     // status changes touch it after that, so for a pending payment it is when
     // this share was calculated.

@@ -1,22 +1,32 @@
+# Pinned by digest so every build uses the same base. To update:
+#   docker pull node:24-slim && docker inspect --format '{{index .RepoDigests 0}}' node:24-slim
+ARG NODE_IMAGE=node:24-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
+
 # Build stage: full deps (TypeScript) to compile src/ into dist/.
-FROM node:24-slim AS build
+FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
-RUN npm run build
+# The sandbox is a local test tool; the server never loads it.
+RUN npm run build && rm -rf dist/sandbox
 
-# Runtime stage: production deps and compiled output only.
-FROM node:24-slim
+# Runtime stage: production deps and compiled output only, owned by root and
+# read-only to the app user, so a compromised process can't rewrite its code.
+FROM ${NODE_IMAGE}
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --from=build /app/dist ./dist
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # Mount a persistent volume here (fly.toml / render.yaml do); without one, state is lost on restart.
-# Runs as root because Fly volumes and Render disks mount root-owned.
 ENV DATA_DIR=/data
-RUN mkdir -p /data
+RUN mkdir -p /data && chown node:node /data && chmod 700 /data
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+# Starts as root only to fix the volume's owner, then runs the server as "node".
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]

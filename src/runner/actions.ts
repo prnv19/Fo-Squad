@@ -5,7 +5,7 @@
 // because the only phone the model can act with is the sender's.
 
 import { z } from "zod";
-import { isOrganizerPhone, resolvePerson, tryNormalizePhone, type EventStore } from "../events/index.js";
+import { isOrganizerContact, resolvePerson, tryNormalizePhone, type EventStore } from "../events/index.js";
 import type { FoSquadService, ToolResult } from "../service.js";
 import { runServiceCall, TOOLS, type ToolDef } from "../tools.js";
 import type { DinnerEvent, Person } from "../types.js";
@@ -65,7 +65,7 @@ interface Actor {
 
 function actorFor(event: DinnerEvent, actorPhone: string | undefined): Actor {
   if (!actorPhone) return { role: "nobody" };
-  if (isOrganizerPhone(event, actorPhone)) return { role: "organizer" };
+  if (isOrganizerContact(event, actorPhone)) return { role: "organizer" };
   const phone = tryNormalizePhone(actorPhone);
   const person = phone ? event.people.find((p) => p.phone === phone) : undefined;
   return person ? { role: "member", person } : { role: "stranger" };
@@ -147,11 +147,12 @@ function omitKey(shape: z.ZodRawShape, key: string): z.ZodRawShape {
 }
 
 function registryAction(tool: ToolDef, ctx: RunContext, deps: ActionDeps): Action {
-  const byPhone = tool.inputShape.by_phone;
-  const byPhoneRequired = byPhone !== undefined && !z.safeParse(byPhone, undefined).success;
-  let shape = omitKey(tool.inputShape, "by_phone");
+  const byPhone = tool.sender !== undefined;
+  const byPhoneRequired = tool.sender === "required";
+  // The relay only texts, so by_email and organizer emails never apply here.
+  let shape = omitKey(omitKey(tool.inputShape, "by_phone"), "by_email");
   // The model never handles by_phone, so its descriptions talk about the sender instead.
-  let description = tool.description.replace(/\bby_phone\b/g, "the sender's phone");
+  let description = tool.description.replace(/\bby_phone\b/g, "the sender's phone").replace(/ \(or by_email\)/g, "");
 
   if (byPhone) {
     description +=
@@ -159,7 +160,7 @@ function registryAction(tool: ToolDef, ctx: RunContext, deps: ActionDeps): Actio
   }
   if (tool.name === "create_event") {
     const organizer = tool.inputShape.organizer as z.ZodObject<z.ZodRawShape>;
-    shape = { ...shape, organizer: z.object(omitKey(organizer.shape, "phone")) };
+    shape = { ...shape, organizer: z.object(omitKey(omitKey(organizer.shape, "phone"), "email")) };
     description += " The organizer's phone is filled in from the text that started this run.";
   }
   const inputSchema = z.object(shape);
@@ -395,7 +396,7 @@ function foTaskAction(ctx: RunContext, deps: ActionDeps, fo: ReturnType<typeof c
       if (event_id && !event) return fail("NOT_FOUND", `I can't find a dinner with id "${event_id}".`);
       if (!event && !EVENTLESS_KINDS.has(kind)) return fail("INVALID_INPUT", `${kind} needs the dinner's event_id.`);
 
-      const organizerRun = !!event && !!ctx.actorPhone && isOrganizerPhone(event, ctx.actorPhone);
+      const organizerRun = !!event && !!ctx.actorPhone && isOrganizerContact(event, ctx.actorPhone);
       const commits = kind === "call_restaurant" || mentionsCommitment(instruction);
       if (commits && !organizerRun) {
         return needsApproval("Calling the restaurant, booking, paying, holding a card or cancelling");

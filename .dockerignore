@@ -1,7 +1,18 @@
+# Only package files, tsconfig, src and the entrypoint are copied, but keep
+# secrets and bulky local files out of the build context entirely.
 node_modules
 dist
 data
 .env
+.env.*
+*.pem
+*.key
+.claude
+.git
+.gitignore
+.DS_Store
+**/.DS_Store
+*.log
 *.pdf
 sandbox-runs
-.git
+coverage

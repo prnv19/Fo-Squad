@@ -57,6 +57,61 @@ export function tryNormalizePhone(raw: string, defaultCountry = "1"): string | u
   }
 }
 
+const EMAIL = /^[^\s@<>()[\]",;:]+@[^\s@<>()[\]",;:]+\.[^\s@<>()[\]",;:.]+$/;
+
+/**
+ * Normalizes an email address to lowercase. Accepts "Maya <maya@x.com>" and
+ * "mailto:" forms, since that's how addresses arrive in email headers. Plus
+ * tags and dots are kept: maya+work@x.com and maya@x.com are different people.
+ */
+export function normalizeEmail(raw: string): string {
+  const input = (raw ?? "").trim();
+  if (!input) throw new FoError("INVALID_INPUT", "Email address is empty.");
+  const bracketed = /<([^<>]+)>\s*$/.exec(input);
+  const address = (bracketed ? bracketed[1]! : input).trim().replace(/^mailto:/i, "").toLowerCase();
+  if (!EMAIL.test(address)) throw new FoError("INVALID_INPUT", `"${input}" doesn't look like an email address.`);
+  return address;
+}
+
+export function tryNormalizeEmail(raw: string): string | undefined {
+  try {
+    return normalizeEmail(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/** A phone number (E.164) or email address (lowercase), whichever `raw` is. */
+export function tryNormalizeContact(raw: string, defaultCountry = "1"): string | undefined {
+  return (raw ?? "").includes("@") ? tryNormalizeEmail(raw) : tryNormalizePhone(raw, defaultCountry);
+}
+
+/** Every way to reach this person, phone first. */
+export function contactsOf(person: Pick<Person, "phone" | "email">): string[] {
+  return [person.phone, person.email].filter((c): c is string => !!c);
+}
+
+/** What identifies them across dinners: their phone, else their email. */
+export function primaryContact(person: Pick<Person, "phone" | "email">): string {
+  return person.phone ?? person.email ?? "";
+}
+
+/** True when `raw` (a phone number or email address) is one of this person's. */
+export function hasContact(person: Pick<Person, "phone" | "email">, raw: string): boolean {
+  const contact = tryNormalizeContact(raw);
+  return !!contact && contactsOf(person).includes(contact);
+}
+
+/** How Fo reaches them: by text when they have a phone, otherwise by email. */
+export function channelOf(person: Pick<Person, "phone" | "email">): "text" | "email" {
+  return person.phone ? "text" : "email";
+}
+
+/** "Maya (+15551234567)" or "Sam (sam@x.com)". */
+export function contactLabel(person: Pick<Person, "name" | "phone" | "email">): string {
+  return `${person.name} (${primaryContact(person)})`;
+}
+
 /**
  * Lowercase slug of a name, suffixed "-2", "-3"... when already in `taken`.
  * Does not add the result to `taken`; the caller owns that set.
@@ -83,7 +138,7 @@ function normalizeName(name: string): string {
   return name.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-/** Finds a person by id, then case-insensitive name, then phone number. */
+/** Finds a person by id, then case-insensitive name, then phone number or email. */
 export function resolvePerson(event: DinnerEvent, ref: string): Person | undefined {
   const trimmed = (ref ?? "").trim();
   if (!trimmed) return undefined;
@@ -95,8 +150,8 @@ export function resolvePerson(event: DinnerEvent, ref: string): Person | undefin
   const byName = event.people.filter((p) => normalizeName(p.name) === name);
   if (byName.length === 1) return byName[0];
 
-  const phone = tryNormalizePhone(trimmed);
-  if (phone) return event.people.find((p) => p.phone === phone);
+  const contact = tryNormalizeContact(trimmed);
+  if (contact) return event.people.find((p) => contactsOf(p).includes(contact));
   return undefined;
 }
 
@@ -117,43 +172,46 @@ export function getOrganizer(event: DinnerEvent): Person | undefined {
   return event.people.find((p) => p.id === event.organizerId);
 }
 
-export function isOrganizerPhone(event: DinnerEvent, phone: string): boolean {
-  const normalized = tryNormalizePhone(phone);
+/** True when `contact` (phone number or email) is one of the organizer's. */
+export function isOrganizerContact(event: DinnerEvent, contact: string): boolean {
   const organizer = getOrganizer(event);
-  return !!normalized && !!organizer && organizer.phone === normalized;
+  return !!organizer && hasContact(organizer, contact);
 }
 
-/** Only the organizer's number can approve bookings, confirm payments or change totals. */
-export function assertOrganizer(event: DinnerEvent, phone: string, action: string): void {
-  if (!isOrganizerPhone(event, phone)) {
+/** Only the organizer's number or email can approve bookings, confirm payments or change totals. */
+export function assertOrganizer(event: DinnerEvent, contact: string, action: string): void {
+  if (!isOrganizerContact(event, contact)) {
     throw new FoError(
       "NOT_ORGANIZER",
-      `Only the organizer can ${action}. That request didn't come from the organizer's number.`,
+      `Only the organizer can ${action}. That request didn't come from the organizer's number or email.`,
     );
   }
 }
 
-/** Fo must never text someone who replied STOP. */
+/** Fo must never message someone who replied STOP. */
 export function assertCanText(person: Person): void {
   if (person.optedOut) {
-    throw new FoError("OPTED_OUT", `${person.name} opted out of texts. Don't message them again.`);
+    throw new FoError("OPTED_OUT", `${person.name} opted out of messages. Don't message them again.`);
   }
 }
 
 /**
- * Two people sharing a number is almost always a typo, and texting the wrong
- * number leaks the plan to a stranger, so refuse before anything is sent.
+ * Two people sharing a number or email is almost always a typo, and messaging
+ * the wrong one leaks the plan to a stranger, so refuse before anything is sent.
  */
-export function assertUniquePhones(people: Pick<Person, "name" | "phone">[]): void {
+export function assertUniqueContacts(people: Pick<Person, "name" | "phone" | "email">[]): void {
   const seen = new Map<string, string>();
   for (const p of people) {
-    const other = seen.get(p.phone);
-    if (other !== undefined) {
-      throw new FoError(
-        "INVALID_INPUT",
-        `${other} and ${p.name} have the same number (${p.phone}). Please double check the numbers with the organizer.`,
-      );
+    for (const contact of contactsOf(p)) {
+      const other = seen.get(contact);
+      if (other !== undefined) {
+        const what = contact.includes("@") ? "email" : "number";
+        throw new FoError(
+          "INVALID_INPUT",
+          `${other} and ${p.name} have the same ${what} (${contact}). Please double check with the organizer.`,
+        );
+      }
+      seen.set(contact, p.name);
     }
-    seen.set(p.phone, p.name);
   }
 }

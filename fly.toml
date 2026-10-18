@@ -1,5 +1,5 @@
 # Fly.io config. Create the volume first: fly volumes create fo_squad_data --size 1
-# Set the token as a secret: fly secrets set FO_SQUAD_TOKEN=<long random string>
+# Set the token as a secret (required; the server won't start without it): fly secrets set FO_SQUAD_TOKEN=$(openssl rand -hex 32)
 app = "fo-squad"
 primary_region = "sjc"
 

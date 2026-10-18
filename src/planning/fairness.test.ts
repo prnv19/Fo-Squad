@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Concession, Person } from "../types.js";
-import { fairnessNote, newConcessions, priorityIds, priorityPhones, redeem } from "./fairness.js";
+import { fairnessNote, newConcessions, priorityIds, priorityContacts, redeem } from "./fairness.js";
 import { tallyVotes } from "./votes.js";
 
 const people: Person[] = [
@@ -32,7 +32,7 @@ describe("fairness memory", () => {
       }),
     );
     expect(memory).toHaveLength(2);
-    expect(priorityPhones(memory, phones)).toEqual(["+15550000002", "+15550000004"]);
+    expect(priorityContacts(memory, phones)).toEqual(["+15550000002", "+15550000004"]);
 
     // Re-running the same tally doesn't double count.
     const again = newConcessions({
@@ -56,7 +56,7 @@ describe("fairness memory", () => {
     ];
     const ids = priorityIds(memory, event2People);
     expect(ids).toEqual(["maya-k"]);
-    expect(fairnessNote({ people: event2People, priorityPhones: ["+15550000002"] })).toBe(
+    expect(fairnessNote({ people: event2People, priorityContacts: ["+15550000002"] })).toBe(
       "Maya gave up a pick last time, so Maya gets priority tonight.",
     );
 
@@ -78,29 +78,29 @@ describe("fairness memory", () => {
     expect(tally.tieBrokenBy).toBe("fairness");
 
     memory = redeem(memory, ["+15550000002"], "e2");
-    expect(memory.find((c) => c.phone === "+15550000002")!.redeemedInEventId).toBe("e2");
-    expect(memory.find((c) => c.phone === "+15550000004")!.redeemedInEventId).toBeUndefined();
-    expect(priorityPhones(memory, phones)).toEqual(["+15550000004"]);
+    expect(memory.find((c) => c.contact === "+15550000002")!.redeemedInEventId).toBe("e2");
+    expect(memory.find((c) => c.contact === "+15550000004")!.redeemedInEventId).toBeUndefined();
+    expect(priorityContacts(memory, phones)).toEqual(["+15550000004"]);
   });
 
   it("skips unknown ids and phones outside the group", () => {
     expect(newConcessions({ eventId: "e1", people, gaveUpIds: ["ghost"], what: "x", now: "2026-10-10T00:00:00Z" })).toEqual([]);
-    const memory: Concession[] = [{ phone: "+19999999999", eventId: "e0", what: "x", at: "2026-01-01T00:00:00Z" }];
-    expect(priorityPhones(memory, phones)).toEqual([]);
+    const memory: Concession[] = [{ contact: "+19999999999", eventId: "e0", what: "x", at: "2026-01-01T00:00:00Z" }];
+    expect(priorityContacts(memory, phones)).toEqual([]);
   });
 
   it("orders priority by each phone's oldest open concession", () => {
     const memory: Concession[] = [
-      { phone: "+15550000003", eventId: "e1", what: "a", at: "2026-02-01T00:00:00Z" },
-      { phone: "+15550000002", eventId: "e1", what: "a", at: "2026-03-01T00:00:00Z" },
-      { phone: "+15550000002", eventId: "e0", what: "a", at: "2026-01-01T00:00:00Z" },
+      { contact: "+15550000003", eventId: "e1", what: "a", at: "2026-02-01T00:00:00Z" },
+      { contact: "+15550000002", eventId: "e1", what: "a", at: "2026-03-01T00:00:00Z" },
+      { contact: "+15550000002", eventId: "e0", what: "a", at: "2026-01-01T00:00:00Z" },
     ];
-    expect(priorityPhones(memory, phones)).toEqual(["+15550000002", "+15550000003"]);
+    expect(priorityContacts(memory, phones)).toEqual(["+15550000002", "+15550000003"]);
   });
 
   it("writes notes without gendered pronouns", () => {
-    expect(fairnessNote({ people, priorityPhones: [] })).toBeUndefined();
-    const note = fairnessNote({ people, priorityPhones: ["+15550000002", "+15550000004"] })!;
+    expect(fairnessNote({ people, priorityContacts: [] })).toBeUndefined();
+    const note = fairnessNote({ people, priorityContacts: ["+15550000002", "+15550000004"] })!;
     expect(note).toBe("Maya and Sam gave up a pick last time, so they get priority tonight.");
     expect(note).not.toMatch(/\b(her|his|she|he)\b/i);
   });

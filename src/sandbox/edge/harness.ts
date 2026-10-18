@@ -13,6 +13,7 @@ import {
   defaultRestaurantReply,
   estimateCostUsd,
   readStandingInstructions,
+  type SandboxBackend,
   type SandboxPerson,
   type UsageTotals,
 } from "../engine.js";
@@ -25,7 +26,10 @@ export const DEFAULT_MAX_RUNS = 8;
 const DEFAULT_WALL_CLOCK_MS = 10 * 60_000;
 
 export interface RunEdgeCaseOptions {
-  anthropic: Anthropic;
+  /** Required for the api backend. */
+  anthropic?: Anthropic;
+  /** Default api. */
+  backend?: SandboxBackend;
   /** One bus per case: its history becomes the case's replay. */
   bus: SandboxBus;
   model?: string;
@@ -72,7 +76,7 @@ const emptyUsage = (): UsageTotals => ({ inputTokens: 0, cacheWriteTokens: 0, ca
 let cachedInstructions: string | undefined;
 
 export async function runEdgeCase(c: EdgeCase, opts: RunEdgeCaseOptions): Promise<EdgeCaseResult> {
-  const { anthropic, bus } = opts;
+  const { anthropic, backend, bus } = opts;
   const startedAt = Date.now();
   const historyStart = bus.history.length;
   const scenario = defaultScenario({
@@ -186,7 +190,8 @@ export async function runEdgeCase(c: EdgeCase, opts: RunEdgeCaseOptions): Promis
   const fired = rules.map(() => false);
 
   const coordinator = createFoCoordinator({
-    anthropic,
+    ...(anthropic ? { anthropic } : {}),
+    ...(backend ? { backend } : {}),
     bus,
     clock: simClock,
     store,

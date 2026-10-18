@@ -14,6 +14,8 @@ export interface ToolDef {
   description: string;
   /** Zod raw shape of the arguments (what MCP's registerTool takes). */
   inputShape: z.ZodRawShape;
+  /** Whether by_phone or by_email (who sent the request) must be given. Absent: the tool takes neither. */
+  sender?: "required" | "optional";
   /** Runs the service call. `args` must already be validated against inputShape. */
   run(service: FoSquadService, args: Record<string, unknown>): Promise<ToolResult>;
 }
@@ -24,6 +26,7 @@ function defineTool<S extends z.ZodRawShape>(def: {
   title: string;
   description: string;
   inputShape: S;
+  sender?: "required" | "optional";
   run: (service: FoSquadService, args: z.output<z.ZodObject<S>>) => Promise<ToolResult>;
 }): ToolDef {
   return def as unknown as ToolDef;
@@ -32,14 +35,18 @@ function defineTool<S extends z.ZodRawShape>(def: {
 const money = z.union([z.string(), z.number()]);
 const eventId = z.string().min(1).describe("The dinner's event_id from create_event or get_status.");
 const person = (what = "The person") =>
-  z.string().min(1).describe(`${what}: person id ("maya"), name ("Maya") or phone number.`);
+  z.string().min(1).describe(`${what}: person id ("maya"), name ("Maya"), phone number or email.`);
 const byPhone = (what: string) =>
-  z.string().min(1).describe(`Phone number the request came from. ${what}`);
+  z.string().min(1).describe(`Phone number the text came from. ${what} For an email, pass by_email instead.`);
+const byEmail = (what: string) =>
+  z.string().min(1).describe(`Email address the email came from. ${what} For a text, pass by_phone instead.`);
+const phone = z.string().optional().describe("Phone number. Fo texts people who have one.");
+const email = z.string().optional().describe("Email address. Fo emails people who have no phone (e.g. a work lunch).");
 const slot = z.object({
   label: z.string().describe('What friends see, e.g. "Sat 7:30pm".'),
   starts_at: z.string().describe("ISO 8601 start time, e.g. 2026-10-24T19:30:00-07:00."),
 });
-const friend = z.object({ name: z.string(), phone: z.string() });
+const friend = z.object({ name: z.string(), phone, email }).describe("Needs a phone or an email.");
 const organizerPick = z.object({
   restaurant_name: z.string(),
   firmness: z.enum(["locked", "suggested"]).describe('"locked" = set, only collect times; "suggested" = default, open to pushback.'),
@@ -51,14 +58,17 @@ export const TOOLS: readonly ToolDef[] = [
     name: "create_event",
     title: "Create a dinner",
     description:
-      "Call when the organizer asks to plan a dinner, or sends a receipt with no active dinner (omit time_slots for a split-only night). Returns event_id, people with ids and phones, and time slots A, B, C...; confirm the list with the organizer before texting anyone.",
+      "Call when the organizer asks to plan a dinner or lunch, or sends a receipt with no active dinner (omit time_slots for a split-only night). Give each person a phone (Fo texts them) or an email (Fo emails them). Returns event_id, people with ids, contacts and channel, and time slots A, B, C...; confirm the list with the organizer before messaging anyone.",
     inputShape: {
       title: z.string().min(1).describe('Short name used in every message, e.g. "Saturday dinner".'),
-      organizer: z.object({
-        name: z.string(),
-        phone: z.string(),
-        venmo: z.string().optional().describe("Organizer's Venmo username, used for pay links."),
-      }),
+      organizer: z
+        .object({
+          name: z.string(),
+          phone,
+          email,
+          venmo: z.string().optional().describe("Organizer's Venmo username, used for pay links."),
+        })
+        .describe("Needs a phone or an email: whatever they reached you from."),
       friends: z.array(friend).min(1),
       time_slots: z.array(slot).optional().describe("3 or 4 options; ids are assigned A, B, C... Omit for a split-only night."),
       budget_per_person: money.optional().describe('Dollars, e.g. "50".'),
@@ -72,18 +82,21 @@ export const TOOLS: readonly ToolDef[] = [
     name: "update_event",
     title: "Organizer edits",
     description:
-      "Organizer-only edits: new time_slots after pick_time finds no overlap (clears slot answers and reopens planning), fix a phone number, add or remove friends, change the pick, Venmo handle or deadline. Returns what changed plus the updated people and slots.",
+      "Organizer-only edits: new time_slots after pick_time finds no overlap (clears slot answers and reopens planning), fix a phone number or email, add or remove friends, change the pick, Venmo handle or deadline. Returns what changed plus the updated people and slots.",
     inputShape: {
       event_id: eventId,
-      by_phone: byPhone("Must be the organizer's number."),
+      by_phone: byPhone("Must be the organizer's number.").optional(),
+      by_email: byEmail("Must be the organizer's email.").optional(),
       time_slots: z.array(slot).optional().describe("Replaces every time option."),
       organizer_pick: organizerPick.optional(),
       organizer_venmo: z.string().optional(),
       reply_deadline: z.string().optional().describe("ISO time in the future."),
       fix_phone: z.object({ person: z.string(), phone: z.string() }).optional(),
+      fix_email: z.object({ person: z.string(), email: z.string() }).optional(),
       add_friends: z.array(friend).optional(),
-      remove_friends: z.array(z.string()).optional().describe("People to remove (id, name or phone)."),
+      remove_friends: z.array(z.string()).optional().describe("People to remove (id, name, phone or email)."),
     },
+    sender: "required",
     run: (service, args) => service.updateEvent(args),
   }),
   defineTool({
@@ -164,10 +177,11 @@ export const TOOLS: readonly ToolDef[] = [
     name: "confirm_booking",
     title: "Confirm the booking",
     description:
-      "Call only after the organizer says yes and the table is booked; by_phone must be the organizer's number. Records the restaurant, slot, party size, deposit and auto gratuity (used by the split) and moves the dinner to Booked.",
+      "Call only after the organizer says yes and the table is booked; by_phone (or by_email) must be the organizer's. Records the restaurant, slot, party size, deposit and auto gratuity (used by the split) and moves the dinner to Booked.",
     inputShape: {
       event_id: eventId,
-      by_phone: byPhone("Must be the organizer's number."),
+      by_phone: byPhone("Must be the organizer's number.").optional(),
+      by_email: byEmail("Must be the organizer's email.").optional(),
       restaurant_name: z.string().min(1),
       slot_id: z.string().optional().describe("Defaults to the slot pick_time chose."),
       party_size: z.number().int().min(1).optional().describe("Defaults to the party size pick_time computed."),
@@ -176,6 +190,7 @@ export const TOOLS: readonly ToolDef[] = [
       auto_gratuity: z.boolean().optional().describe("Restaurant adds gratuity automatically (large party)."),
       notes: z.string().optional().describe("Cancellation policy and anything else worth remembering."),
     },
+    sender: "required",
     run: (service, args) => service.confirmBooking(args),
   }),
   defineTool({
@@ -206,7 +221,7 @@ export const TOOLS: readonly ToolDef[] = [
       "Call after the organizer confirms who actually came, including the organizer if they ate. Only attendees can claim items. Returns attendees and the numbered item list.",
     inputShape: {
       event_id: eventId,
-      people: z.array(z.string()).min(1).describe("Everyone who came (ids, names or phones)."),
+      people: z.array(z.string()).min(1).describe("Everyone who came (ids, names, phones or emails)."),
     },
     run: (service, args) => service.setAttendees(args),
   }),
@@ -233,29 +248,33 @@ export const TOOLS: readonly ToolDef[] = [
     inputShape: {
       event_id: eventId,
       by_phone: byPhone("Required (organizer's number) when using split_evenly or treated.").optional(),
+      by_email: byEmail("Required (organizer's email) when using split_evenly or treated.").optional(),
       unclaimed_policy: z.enum(["block", "split_evenly"]).optional(),
       treated: z.array(z.string()).optional().describe("People being treated (birthday); their share moves onto everyone else."),
       fees_split_evenly: z.boolean().optional().describe("Split fees evenly instead of by subtotal."),
     },
+    sender: "optional",
     run: (service, args) => service.calculateShares(args),
   }),
   defineTool({
     name: "mark_paid",
     title: "Mark a payment",
     description:
-      "Call when a friend says they paid (by_phone = their phone, records says_paid) or the organizer confirms (by_phone = organizer, records paid). Anyone else is refused. Settles the dinner once everyone is paid.",
+      "Call when a friend says they paid (by_phone or by_email = theirs, records says_paid) or the organizer confirms (= the organizer's, records paid). Anyone else is refused. Settles the dinner once everyone is paid.",
     inputShape: {
       event_id: eventId,
       person: person("Who paid"),
-      by_phone: byPhone("The friend's own number or the organizer's."),
+      by_phone: byPhone("The friend's own number or the organizer's.").optional(),
+      by_email: byEmail("The friend's own email or the organizer's.").optional(),
     },
+    sender: "required",
     run: (service, args) => service.markPaid(args),
   }),
   defineTool({
     name: "record_opt_out",
     title: "Friend replied STOP",
     description:
-      "Call when a friend replies STOP. Never text them again. Returns a message to pass to the organizer.",
+      "Call when a friend replies STOP to a text or asks to unsubscribe from emails. Never message them again. Returns a message to pass to the organizer.",
     inputShape: { event_id: eventId, person: person() },
     run: (service, args) => service.recordOptOut(args),
   }),
@@ -263,10 +282,11 @@ export const TOOLS: readonly ToolDef[] = [
     name: "get_status",
     title: "Where things stand",
     description:
-      "Call whenever unsure what to do. With event_id, or with the phone of whoever texted you to find their active dinner. Returns the stage, who is pending and next_action; found: false means no active dinner for that number.",
+      "Call whenever unsure what to do. With event_id, or with the phone (text) or email (email) of whoever messaged you to find their active dinner. Returns the stage, who is pending with their contact and channel, and next_action; found: false means no active dinner for that number or email.",
     inputShape: {
       event_id: z.string().optional(),
       phone: z.string().optional(),
+      email: z.string().optional(),
     },
     run: (service, args) => service.getStatus(args),
   }),];

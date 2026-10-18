@@ -96,7 +96,7 @@ describe("security edge cases: seeds", () => {
     const all = await s.store.list();
     expect(all.map((e) => e.stage).sort()).toEqual(["paying", "settled"]);
     expect((await s.event()).stage).toBe("paying");
-    expect((await s.store.findActiveByPhone(phone("maya")))?.id).toBe(s.eventId);
+    expect((await s.store.findActiveByContact(phone("maya")))?.id).toBe(s.eventId);
   });
 
   it("prompt-injection-mark-paid: paying, nobody paid", async () => {

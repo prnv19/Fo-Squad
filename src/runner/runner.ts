@@ -295,7 +295,7 @@ export class Runner {
         return false;
       }
     }
-    const event = await this.store.findActiveByPhone(phone);
+    const event = await this.store.findActiveByContact(phone);
 
     if (isStopMessage(message.text)) {
       if (!event) {
@@ -334,7 +334,7 @@ export class Runner {
     const phones = new Set<string>();
     for (const e of await this.store.list()) {
       if (e.stage === "settled") continue;
-      for (const p of e.people) if (p.name.trim().toLowerCase() === name) phones.add(p.phone);
+      for (const p of e.people) if (p.phone && p.name.trim().toLowerCase() === name) phones.add(p.phone);
     }
     return phones.size === 1 ? [...phones][0] : undefined;
   }
@@ -345,12 +345,13 @@ export class Runner {
     const person = event.people.find((p) => p.phone === phone);
     const organizer = event.people.find((p) => p.id === event.organizerId);
     this.log(`[${event.id}] ${person?.name ?? phone} opted out`);
-    if (!organizer || organizer.optedOut || organizer.phone === phone) return false;
+    // The relay only texts, so an organizer without a phone can't be told here.
+    if (!organizer?.phone || organizer.optedOut || organizer.phone === phone) return false;
     const notice =
       typeof result.tell_organizer === "string"
         ? result.tell_organizer
         : `${person?.name ?? phone} replied STOP, so I won't text them again about "${event.title}".`;
-    const reply = await this.askFo(event, formatSendBatch(event.title, [{ ...organizer, text: notice }]));
+    const reply = await this.askFo(event, formatSendBatch(event.title, [{ name: organizer.name, phone: organizer.phone, text: notice }]));
     if (reply.status === "failed") {
       throw new Error(`opt-out saved, but Fo couldn't tell the organizer: ${reply.response ?? "no details"}`);
     }

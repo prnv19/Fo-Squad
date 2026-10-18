@@ -26,10 +26,12 @@ export interface Person {
   /** Stable id, lowercase slug of the name (e.g. "maya"). Unique per event. */
   id: string;
   name: string;
-  /** E.164 phone number, e.g. "+15551234567". */
-  phone: string;
+  /** E.164 phone number, e.g. "+15551234567". Every person has a phone, an email or both. */
+  phone?: string;
+  /** Lowercase email address, for people Fo reaches by email (e.g. a work lunch). */
+  email?: string;
   isOrganizer: boolean;
-  /** Friend replied STOP. Fo must not text them again. */
+  /** Friend replied STOP (or unsubscribe). Fo must not message them again. */
   optedOut?: boolean;
 }
 
@@ -91,8 +93,8 @@ export type PickFirmness = "locked" | "suggested";
 
 /** Fairness memory: who gave something up, so they get priority next time. */
 export interface Concession {
-  /** Phone number, since person ids are per event but phones persist across dinners. */
-  phone: string;
+  /** The person's phone, or email if they have no phone: ids are per event, contacts persist across dinners. */
+  contact: string;
   eventId: string;
   /** What they gave up, e.g. "cuisine: thai" or "time slot". */
   what: string;

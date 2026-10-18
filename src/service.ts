@@ -6,24 +6,28 @@ import {
   assertCanText,
   assertOrganizer,
   assertStage,
-  assertUniquePhones,
+  assertUniqueContacts,
+  channelOf,
+  contactLabel,
+  contactsOf,
   createEvent,
   DEFAULT_REPLY_WINDOW_MS,
   FoError,
   generateEventId,
   getOrganizer,
   getStatus,
-  isOrganizerPhone,
-  normalizePhone,
+  hasContact,
+  isOrganizerContact,
+  primaryContact,
   requirePerson,
   resolvePerson,
   slugId,
   transition,
-  tryNormalizePhone,
   updateEvent,
   withEventLock,
   type EventStore,
 } from "./events/index.js";
+import { contactFor } from "./events/factory.js";
 import {
   fairnessNote,
   filterRestaurantOptions,
@@ -77,9 +81,17 @@ export interface SlotArg {
   label: string;
   starts_at: string;
 }
+/** Phone for people Fo texts, email for people Fo emails; at least one. */
 export interface FriendArg {
   name: string;
-  phone: string;
+  phone?: string;
+  email?: string;
+}
+
+/** Who a request came from: by_phone for a text, by_email for an email. */
+export interface SenderArgs {
+  by_phone?: string;
+  by_email?: string;
 }
 export interface OrganizerPickArg {
   restaurant_name: string;
@@ -88,7 +100,7 @@ export interface OrganizerPickArg {
 
 export interface CreateEventArgs {
   title: string;
-  organizer: { name: string; phone: string; venmo?: string };
+  organizer: { name: string; phone?: string; email?: string; venmo?: string };
   friends: FriendArg[];
   time_slots?: SlotArg[];
   budget_per_person?: Money;
@@ -97,14 +109,14 @@ export interface CreateEventArgs {
   organizer_pick?: OrganizerPickArg;
 }
 
-export interface UpdateEventArgs {
+export interface UpdateEventArgs extends SenderArgs {
   event_id: string;
-  by_phone: string;
   time_slots?: SlotArg[];
   organizer_pick?: OrganizerPickArg;
   organizer_venmo?: string;
   reply_deadline?: string;
   fix_phone?: { person: string; phone: string };
+  fix_email?: { person: string; email: string };
   add_friends?: FriendArg[];
   remove_friends?: string[];
 }
@@ -142,9 +154,8 @@ export interface RecordVoteArgs {
   option: string;
 }
 
-export interface ConfirmBookingArgs {
+export interface ConfirmBookingArgs extends SenderArgs {
   event_id: string;
-  by_phone: string;
   restaurant_name: string;
   slot_id?: string;
   party_size?: number;
@@ -179,23 +190,22 @@ export interface RecordClaimsArgs {
   items?: { number: number; weight?: number }[];
 }
 
-export interface CalculateSharesArgs {
+export interface CalculateSharesArgs extends SenderArgs {
   event_id: string;
-  by_phone?: string;
   unclaimed_policy?: "block" | "split_evenly";
   treated?: string[];
   fees_split_evenly?: boolean;
 }
 
-export interface MarkPaidArgs {
+export interface MarkPaidArgs extends SenderArgs {
   event_id: string;
   person: string;
-  by_phone: string;
 }
 
 export interface GetStatusArgs {
   event_id?: string;
   phone?: string;
+  email?: string;
 }
 
 // ---------- Small pure helpers ----------
@@ -232,12 +242,22 @@ function cleanVenmo(raw: string): string | undefined {
   return handle;
 }
 
-function phoneOrThrow(name: string, raw: string): string {
-  try {
-    return normalizePhone(raw);
-  } catch (err) {
-    throw invalid(`${name}'s number: ${err instanceof Error ? err.message : String(err)}`);
-  }
+/** The phone number or email the request came from: exactly one of by_phone and by_email. */
+function senderOf(args: SenderArgs): string {
+  const phone = args.by_phone?.trim();
+  const email = args.by_email?.trim();
+  if (phone && email) throw invalid("Pass by_phone for a text or by_email for an email, not both.");
+  if (!phone && !email) throw invalid("Say who this came from: by_phone for a text or by_email for an email.");
+  return (phone || email)!;
+}
+
+/** "text Maya (+1555...) and Jordan (+1555...), and email Sam (sam@x.com)". */
+function reachList(people: Person[]): string {
+  const texted = people.filter((p) => channelOf(p) === "text").map(contactLabel);
+  const emailed = people.filter((p) => channelOf(p) === "email").map(contactLabel);
+  return [texted.length ? `text ${joinNames(texted)}` : "", emailed.length ? `email ${joinNames(emailed)}` : ""]
+    .filter(Boolean)
+    .join(", and ");
 }
 
 function buildSlots(slots: SlotArg[]): TimeSlot[] {
@@ -268,6 +288,12 @@ function sameState(a: DinnerEvent, b: DinnerEvent): boolean {
 const nameOf = (event: DinnerEvent, id: string): string =>
   event.people.find((p) => p.id === id)?.name ?? id;
 const namesOf = (event: DinnerEvent, ids: readonly string[]): string[] => ids.map((id) => nameOf(event, id));
+/** Priority person ids as the contacts fairnessNote matches on. */
+const priorityContactsOf = (event: DinnerEvent, ids: readonly string[]): string[] =>
+  ids.flatMap((id) => {
+    const p = event.people.find((x) => x.id === id);
+    return p ? [primaryContact(p)] : [];
+  });
 const nameMap = (event: DinnerEvent): Record<string, string> =>
   Object.fromEntries(event.people.map((p) => [p.id, p.name]));
 
@@ -281,14 +307,19 @@ function slotJson(s: TimeSlot) {
 
 function organizerJson(event: DinnerEvent) {
   const o = event.people.find((p) => p.id === event.organizerId);
-  return o ? { id: o.id, name: o.name, phone: o.phone } : undefined;
+  return o ? { id: o.id, name: o.name, ...contactJson(o) } : undefined;
+}
+
+/** phone and/or email, plus the channel Fo uses to reach them. */
+function contactJson(p: Person) {
+  return { ...(p.phone ? { phone: p.phone } : {}), ...(p.email ? { email: p.email } : {}), channel: channelOf(p) };
 }
 
 function peopleJson(event: DinnerEvent) {
   return event.people.map((p) => ({
     id: p.id,
     name: p.name,
-    phone: p.phone,
+    ...contactJson(p),
     is_organizer: p.isOrganizer,
     ...(p.optedOut ? { opted_out: true } : {}),
   }));
@@ -519,8 +550,8 @@ export class FoSquadService {
       (e) =>
         e.stage === "planning" &&
         e.title === draft.title &&
-        JSON.stringify(e.people.map((p) => [p.name, p.phone])) ===
-          JSON.stringify(draft.people.map((p) => [p.name, p.phone])) &&
+        JSON.stringify(e.people.map((p) => [p.name, p.phone, p.email])) ===
+          JSON.stringify(draft.people.map((p) => [p.name, p.phone, p.email])) &&
         JSON.stringify(e.timeSlots) === JSON.stringify(draft.timeSlots),
     );
     if (duplicate) return this.createdResult(duplicate, true);
@@ -534,10 +565,7 @@ export class FoSquadService {
   }
 
   private createdResult(event: DinnerEvent, alreadyExisted: boolean): ToolResult {
-    const list = event.people
-      .filter((p) => !p.isOrganizer)
-      .map((p) => `${p.name} (${p.phone})`)
-      .join(", ");
+    const list = reachList(event.people.filter((p) => !p.isOrganizer));
     return this.ok(
       event,
       {
@@ -554,9 +582,9 @@ export class FoSquadService {
           ? { organizer_pick: { restaurant_name: event.organizerPick.restaurantName, firmness: event.organizerPick.firmness } }
           : {}),
         ...(event.organizerVenmo ? { organizer_venmo: event.organizerVenmo } : {}),
-        confirm_with_organizer: `I'll text ${list}. Look right?`,
+        confirm_with_organizer: `I'll ${list}. Look right?`,
       },
-      `Confirm the list with the organizer before texting anyone (fix numbers with update_event). Then:`,
+      `Confirm the list with the organizer before messaging anyone (fix numbers or emails with update_event). Then:`,
     );
   }
 
@@ -565,7 +593,7 @@ export class FoSquadService {
   async updateEvent(args: UpdateEventArgs): Promise<ToolResult> {
     const { event, data } = await this.mutate(args.event_id, (e, nowIso) => {
       assertStage(e, ["planning", "voting", "booked"], "change the plan");
-      assertOrganizer(e, args.by_phone, "change the plan");
+      assertOrganizer(e, senderOf(args), "change the plan");
       const nowMs = Date.parse(nowIso);
       const changes: string[] = [];
       const warnings: string[] = [];
@@ -589,10 +617,19 @@ export class FoSquadService {
 
       if (args.fix_phone) {
         const person = requirePerson(e, args.fix_phone.person);
-        const phone = phoneOrThrow(person.name, args.fix_phone.phone);
+        const { phone } = contactFor(person.name, { phone: args.fix_phone.phone });
         if (person.phone !== phone) {
           e.people = e.people.map((p) => (p.id === person.id ? { ...p, phone } : p));
           changes.push(`${person.name}'s number is now ${phone}.`);
+        }
+      }
+
+      if (args.fix_email) {
+        const person = requirePerson(e, args.fix_email.person);
+        const { email } = contactFor(person.name, { email: args.fix_email.email });
+        if (person.email !== email) {
+          e.people = e.people.map((p) => (p.id === person.id ? { ...p, email } : p));
+          changes.push(`${person.name}'s email is now ${email}.`);
         }
       }
 
@@ -601,17 +638,17 @@ export class FoSquadService {
         for (const f of args.add_friends) {
           const name = f.name.trim().replace(/\s+/g, " ");
           if (!name) throw invalid("Each new friend needs a name.");
-          const phone = phoneOrThrow(name, f.phone);
-          const existing = e.people.find((p) => p.phone === phone);
+          const contact = contactFor(name, f);
+          const existing = e.people.find((p) => contactsOf(contact).some((c) => contactsOf(p).includes(c)));
           // Same person sent twice is a retry, not a duplicate.
           if (existing && existing.name.toLowerCase() === name.toLowerCase()) continue;
           const id = slugId(name, taken);
           taken.add(id);
-          e.people.push({ id, name, phone, isOrganizer: false });
+          e.people.push({ id, name, ...contact, isOrganizer: false });
           changes.push(`Added ${name}.`);
         }
       }
-      assertUniquePhones(e.people);
+      assertUniqueContacts(e.people);
 
       if (args.organizer_venmo !== undefined) {
         const handle = cleanVenmo(args.organizer_venmo);
@@ -826,8 +863,7 @@ export class FoSquadService {
 
     const { time, prio } = data;
     const invited = event.people.filter((p) => !p.optedOut);
-    const prioPhones = prio.map((id) => event.people.find((p) => p.id === id)?.phone).filter((p): p is string => !!p);
-    const note = fairnessNote({ people: invited, priorityPhones: prioPhones });
+    const note = fairnessNote({ people: invited, priorityContacts: priorityContactsOf(event, prio) });
     const ranking = time.ranking.map((r) => ({ slot_id: r.slotId, label: r.label, can_make: r.count }));
 
     if (!time.slotId || !data.cuisine || !data.constraints) {
@@ -902,8 +938,12 @@ export class FoSquadService {
           ...newConcessions({ eventId: event.id, people: event.people, gaveUpIds: g.gaveUpIds, what: g.what, now: nowIso, existing: next }),
         ];
       }
-      const phones = redeemIds.map((id) => event.people.find((p) => p.id === id)?.phone).filter((p): p is string => !!p);
-      return phones.length ? redeem(next, phones, event.id) : next;
+      // Every contact, so a concession recorded under either one is honored.
+      const contacts = redeemIds.flatMap((id) => {
+        const p = event.people.find((x) => x.id === id);
+        return p ? contactsOf(p) : [];
+      });
+      return contacts.length ? redeem(next, contacts, event.id) : next;
     });
   }
 
@@ -1051,8 +1091,7 @@ export class FoSquadService {
       tally.tieBrokenBy === "fairness" ? prio.filter((id) => id !== event.organizerId && best.voterIds.includes(id)) : [];
     await this.recordConcessions(event, [{ gaveUpIds: tally.gaveUp, what: "restaurant" }], beneficiaries, nowIso);
 
-    const prioPhones = prio.map((id) => event.people.find((p) => p.id === id)?.phone).filter((p): p is string => !!p);
-    const note = fairnessNote({ people: event.people, priorityPhones: prioPhones });
+    const note = fairnessNote({ people: event.people, priorityContacts: priorityContactsOf(event, prio) });
     const slotId = event.chosenSlotId;
     const partySize = slotId ? partySizeFor(event, slotId, nowIso) : undefined;
     const slot = slotLabel(event, slotId);
@@ -1075,7 +1114,7 @@ export class FoSquadService {
   async confirmBooking(args: ConfirmBookingArgs): Promise<ToolResult> {
     const { event } = await this.mutate(args.event_id, (e, nowIso) => {
       assertStage(e, ["planning", "voting", "booked"], "confirm a booking");
-      assertOrganizer(e, args.by_phone, "approve a booking");
+      assertOrganizer(e, senderOf(args), "approve a booking");
       const restaurantName = args.restaurant_name.trim();
       if (!restaurantName) throw invalid("Which restaurant? restaurant_name is empty.");
 
@@ -1332,7 +1371,7 @@ export class FoSquadService {
     const { event, data } = await this.mutate(args.event_id, (e, nowIso) => {
       assertStage(e, ["claiming", "paying"], "calculate shares");
       const overrides = args.unclaimed_policy === "split_evenly" || args.treated !== undefined;
-      if (overrides) assertOrganizer(e, args.by_phone ?? "", "split unclaimed items evenly or set who's being treated");
+      if (overrides) assertOrganizer(e, senderOf(args), "split unclaimed items evenly or set who's being treated");
       if (!e.attendeeIds) throw invalid("Confirm who came with set_attendees first.");
 
       if (args.unclaimed_policy) e.unclaimedPolicy = args.unclaimed_policy;
@@ -1408,7 +1447,7 @@ export class FoSquadService {
       messages: friends.map((r) => ({
         person_id: r.person.id,
         name: r.person.name,
-        phone: r.person.phone,
+        ...contactJson(r.person),
         amount_cents: r.share.totalCents,
         amount: formatCents(r.share.totalCents),
         message: r.message,
@@ -1431,9 +1470,10 @@ export class FoSquadService {
             : `${person.name} doesn't owe anything for "${e.title}".`,
         );
       }
-      const fromOrganizer = isOrganizerPhone(e, args.by_phone);
-      const fromSelf = tryNormalizePhone(args.by_phone) === person.phone;
-      if (!fromOrganizer && !fromSelf) assertOrganizer(e, args.by_phone, `mark ${person.name} paid`);
+      const by = senderOf(args);
+      const fromOrganizer = isOrganizerContact(e, by);
+      const fromSelf = hasContact(person, by);
+      if (!fromOrganizer && !fromSelf) assertOrganizer(e, by, `mark ${person.name} paid`);
 
       // A text is never proof: only the organizer's word makes it "paid", and a
       // friend's "Paid!" never downgrades an organizer-confirmed payment.
@@ -1472,7 +1512,10 @@ export class FoSquadService {
     return this.ok(event, {
       person: { id: data.person.id, name: data.person.name },
       opted_out: true,
-      tell_organizer: `${data.person.name} replied STOP, so I won't text them again about "${event.title}".`,
+      tell_organizer:
+        channelOf(data.person) === "email"
+          ? `${data.person.name} unsubscribed, so I won't email them again about "${event.title}".`
+          : `${data.person.name} replied STOP, so I won't text them again about "${event.title}".`,
     });
   }
 
@@ -1480,18 +1523,19 @@ export class FoSquadService {
 
   async getStatus(args: GetStatusArgs): Promise<ToolResult> {
     let event: DinnerEvent | undefined;
+    const contact = args.phone?.trim() || args.email?.trim();
     if (args.event_id) event = await this.load(args.event_id);
-    else if (args.phone) event = await this.store.findActiveByPhone(args.phone);
+    else if (contact) event = await this.store.findActiveByContact(contact);
     if (!event) {
       return {
         ok: true,
         found: false,
         next_action:
-          "No active dinner for this number. If the organizer wants to plan one, call create_event; if they sent a receipt, ask who was there and create_event (no time slots) before add_receipt.",
+          "No active dinner for this number or email. If the organizer wants to plan one, call create_event; if they sent a receipt, ask who was there and create_event (no time slots) before add_receipt.",
       };
     }
     const status = getStatus(event, this.clock());
-    const caller = args.phone ? resolvePerson(event, args.phone) : undefined;
+    const caller = contact ? resolvePerson(event, contact) : undefined;
     return {
       ok: true,
       found: true,
@@ -1505,9 +1549,12 @@ export class FoSquadService {
       organizer: organizerJson(event),
       // Everyone, so a day-of reminder or "Booked!" text can reach attendees too.
       people: peopleJson(event),
-      // Phones included because a nudge or reminder may run in a fresh turn
+      // Contacts included because a nudge or reminder may run in a fresh turn
       // (scheduled action) with no memory of the thread that had the numbers.
-      pending: status.pending.map((p) => ({ ...p, phone: event.people.find((x) => x.id === p.id)?.phone })),
+      pending: status.pending.map((p) => {
+        const person = event.people.find((x) => x.id === p.id);
+        return { ...p, ...(person ? contactJson(person) : {}) };
+      }),
       details: status.details,
       next_action: status.nextAction,
     };

@@ -17,16 +17,20 @@ const kase = (id: string, area: EdgeCase["area"], critical: boolean): EdgeCase =
 
 describe("edge CLI", () => {
   it("parses flags with defaults", () => {
-    expect(parseEdgeArgs([], {})).toEqual({ filter: {}, concurrency: 3, maxUsd: 25, model: "claude-opus-5-5", list: false, viewer: false });
+    expect(parseEdgeArgs([], {})).toEqual({ filter: {}, concurrency: 3, maxUsd: 25, backend: "claude-code", model: "claude-haiku-5-5", list: false, viewer: false });
     expect(parseEdgeArgs(["--only", "a, b", "--area", "security", "--critical", "--concurrency", "2", "--max-usd", "7.5", "--model", "m"], {})).toEqual({
       filter: { only: ["a", "b"], area: "security", criticalOnly: true },
       concurrency: 2,
       maxUsd: 7.5,
+      backend: "claude-code",
       model: "m",
       list: false,
       viewer: false,
     });
     expect(parseEdgeArgs([], { SANDBOX_MODEL: "env-model" }).model).toBe("env-model");
+    expect(parseEdgeArgs(["--backend", "api"], {})).toMatchObject({ backend: "api", model: "claude-opus-5-5" });
+    expect(parseEdgeArgs([], { SANDBOX_BACKEND: "api" }).backend).toBe("api");
+    expect(() => parseEdgeArgs(["--backend", "bedrock"], {})).toThrow(/backend must be/);
     expect(() => parseEdgeArgs(["--area", "dessert"], {})).toThrow(/--area must be one of/);
     expect(() => parseEdgeArgs(["--max-usd", "0"], {})).toThrow(/--max-usd/);
     expect(() => parseEdgeArgs(["--bogus"], {})).toThrow();

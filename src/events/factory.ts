@@ -1,14 +1,15 @@
 import type { Cents, DinnerEvent, Person, PickFirmness, TimeSlot } from "../types.js";
 import { FoError } from "./errors.js";
 import { generateEventId, isValidEventId } from "./ids.js";
-import { assertUniquePhones, normalizePhone, slugId } from "./people.js";
+import { assertUniqueContacts, contactsOf, normalizeEmail, normalizePhone, slugId } from "./people.js";
 import { toIso, toMs } from "./util.js";
 
 /** Already parsed input for create_event. Money is integer cents. */
 export interface CreateEventInput {
   title: string;
-  organizer: { name: string; phone: string; venmo?: string };
-  friends: { name: string; phone: string }[];
+  /** Each person needs a phone, an email or both. */
+  organizer: { name: string; phone?: string; email?: string; venmo?: string };
+  friends: { name: string; phone?: string; email?: string }[];
   timeSlots: { label: string; startsAt: string }[];
   budgetPerPersonCents?: Cents;
   cuisineHint?: string;
@@ -37,13 +38,30 @@ function cleanName(name: unknown, what: string): string {
   return cleaned;
 }
 
-function phoneFor(name: string, raw: string, defaultCountry: string): string {
-  try {
-    return normalizePhone(raw, defaultCountry);
-  } catch (err) {
-    const why = err instanceof Error ? err.message : String(err);
-    throw invalid(`${name}'s number: ${why}`);
+/** Normalized phone and/or email; at least one is required. Empty strings count as missing. */
+export function contactFor(
+  name: string,
+  raw: { phone?: string | undefined; email?: string | undefined },
+  defaultCountry = "1",
+): { phone?: string; email?: string } {
+  const out: { phone?: string; email?: string } = {};
+  const why = (err: unknown) => (err instanceof Error ? err.message : String(err));
+  if (raw.phone?.trim()) {
+    try {
+      out.phone = normalizePhone(raw.phone, defaultCountry);
+    } catch (err) {
+      throw invalid(`${name}'s number: ${why(err)}`);
+    }
   }
+  if (raw.email?.trim()) {
+    try {
+      out.email = normalizeEmail(raw.email);
+    } catch (err) {
+      throw invalid(`${name}'s email: ${why(err)}`);
+    }
+  }
+  if (!out.phone && !out.email) throw invalid(`${name} needs a phone number or an email address.`);
+  return out;
 }
 
 function cleanVenmo(raw: string | undefined): string | undefined {
@@ -77,25 +95,26 @@ export function createEvent(input: CreateEventInput, opts: CreateEventOptions): 
   const organizer: Person = {
     id: slugId(organizerName, taken),
     name: organizerName,
-    phone: phoneFor(organizerName, input.organizer.phone, country),
+    ...contactFor(organizerName, input.organizer, country),
     isOrganizer: true,
   };
   taken.add(organizer.id);
+  const organizerContacts = contactsOf(organizer);
 
   const friends: Person[] = input.friends.map((f, i) => {
     const name = cleanName(f?.name, `Friend #${i + 1}`);
-    const phone = phoneFor(name, f.phone, country);
-    if (phone === organizer.phone) {
-      throw invalid(
-        `${name}'s number (${phone}) is the organizer's own number. Please double check it with the organizer.`,
-      );
+    const contact = contactFor(name, f, country);
+    const clash = contactsOf(contact).find((c) => organizerContacts.includes(c));
+    if (clash) {
+      const what = clash.includes("@") ? "email" : "number";
+      throw invalid(`${name}'s ${what} (${clash}) is the organizer's own ${what}. Please double check it with the organizer.`);
     }
-    const person: Person = { id: slugId(name, taken), name, phone, isOrganizer: false };
+    const person: Person = { id: slugId(name, taken), name, ...contact, isOrganizer: false };
     taken.add(person.id);
     return person;
   });
   const people = [organizer, ...friends];
-  assertUniquePhones(people);
+  assertUniqueContacts(people);
 
   const slotsIn = Array.isArray(input.timeSlots) ? input.timeSlots : [];
   if (slotsIn.length > MAX_SLOTS) throw invalid(`At most ${MAX_SLOTS} time options, please.`);

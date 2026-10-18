@@ -14,6 +14,7 @@ import { MemoryStore, tryNormalizePhone, type EventStore } from "../events/index
 import { escapeUntrusted } from "../runner/prompt.js";
 import { FoSquadService } from "../service.js";
 import { runServiceCall, TOOLS, type ToolDef } from "../tools.js";
+import { runClaudeCodeTurn } from "./claudeCode.js";
 import { SimClock } from "./clock.js";
 import type { SandboxBus } from "./events.js";
 import { PersonaResponder } from "./personas.js";
@@ -26,6 +27,9 @@ type RunnerParams = Anthropic.Beta.Messages.BetaToolRunnerParams & { stream: fal
 type RunnableTool = BetaRunnableTool<Record<string, unknown>>;
 
 export const DEFAULT_SANDBOX_MODEL = "claude-opus-5-5";
+
+/** api: the Messages API with an API key. claude-code: the Agent SDK on the machine's Claude Code login. */
+export type SandboxBackend = "api" | "claude-code";
 const MAX_TOKENS = 16000;
 const THREAD_LINES_IN_PROMPT = 12;
 const SEARCHES_PER_RUN = 5;
@@ -48,9 +52,12 @@ export interface UsageTotals {
   outputTokens: number;
   webSearches: number;
   requests: number;
+  /** Cost Claude Code reported for its runs (list prices for the model it used); replaces the Opus estimate. */
+  reportedUsd?: number;
 }
 
 export function estimateCostUsd(u: UsageTotals): number {
+  if (u.reportedUsd !== undefined) return Math.round(u.reportedUsd * 10_000) / 10_000;
   const usd =
     (u.inputTokens * PRICING.inputPerMTok +
       u.cacheWriteTokens * PRICING.cacheWritePerMTok +
@@ -63,7 +70,10 @@ export function estimateCostUsd(u: UsageTotals): number {
 
 export interface RunSandboxOptions {
   scenario: Scenario;
-  anthropic: Anthropic;
+  /** Required for the api backend. */
+  anthropic?: Anthropic;
+  /** Default api. */
+  backend?: SandboxBackend;
   bus: SandboxBus;
   model?: string;
   /** Cap on coordinator runs (one per delivered text or fired timer). */
@@ -199,7 +209,10 @@ export interface DuplicateTimer {
 }
 
 export interface CoordinatorOptions {
-  anthropic: Anthropic;
+  /** Required for the api backend. */
+  anthropic?: Anthropic;
+  /** Default api. */
+  backend?: SandboxBackend;
   bus: SandboxBus;
   clock: SimClock;
   store: EventStore;
@@ -253,6 +266,8 @@ export interface FoCoordinator {
 /** The per-run coordinator: tools, run message, the model loop and its bookkeeping. */
 export function createFoCoordinator(opts: CoordinatorOptions): FoCoordinator {
   const { anthropic, bus, clock, store, service, people, systemPrompt, model } = opts;
+  const backend = opts.backend ?? "api";
+  if (backend === "api" && !anthropic) throw new Error("The api backend needs an Anthropic client.");
   const tz = opts.timeZone;
   const maxIterations = opts.maxIterationsPerRun;
   const retryDelays = opts.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
@@ -508,10 +523,8 @@ export function createFoCoordinator(opts: CoordinatorOptions): FoCoordinator {
     };
   };
 
-  const tools: RunnerParams["tools"] = [
-    ...[...TOOLS.map(foSquadTool), sendText, scheduleAction, callRestaurant, readReceipt].map(observed),
-    webSearch,
-  ];
+  const customTools = [...TOOLS.map(foSquadTool), sendText, scheduleAction, callRestaurant, readReceipt].map(observed);
+  const tools: RunnerParams["tools"] = [...customTools, webSearch];
 
   // ---------- one coordinator run ----------
 
@@ -578,6 +591,7 @@ export function createFoCoordinator(opts: CoordinatorOptions): FoCoordinator {
     if (turns >= opts.maxTurns) return;
     turns++;
     runTrigger.current = trigger;
+    if (backend === "claude-code") return runOnClaudeCode(trigger);
 
     let params: RunnerParams = {
       model,
@@ -596,7 +610,7 @@ export function createFoCoordinator(opts: CoordinatorOptions): FoCoordinator {
     let iterations = 0;
     let retries = 0;
     for (;;) {
-      const runner = anthropic.beta.messages.toolRunner(params);
+      const runner = (anthropic as Anthropic).beta.messages.toolRunner(params);
       try {
         let last: BetaMessage | undefined;
         // pause_turn needs no handling here: this SDK's runner resends a
@@ -631,6 +645,43 @@ export function createFoCoordinator(opts: CoordinatorOptions): FoCoordinator {
         bus.emit({ type: "error", at: now(), message: clip(what, 500) });
         return;
       }
+    }
+  };
+
+  /** The same run on Claude Code. It retries API errors itself, so anything it gives up on is fatal. */
+  const runOnClaudeCode = async (trigger: Trigger): Promise<void> => {
+    const out = await runClaudeCodeTurn({
+      model,
+      systemPrompt,
+      prompt: runMessage(trigger),
+      tools: customTools,
+      maxTurns: maxIterations,
+      onSearch: (q) => bus.emit({ type: "search", at: now(), query: q }),
+      overBudget,
+    });
+    const u = out.usage;
+    usage.requests += u.requests;
+    usage.inputTokens += u.inputTokens;
+    usage.cacheWriteTokens += u.cacheWriteTokens;
+    usage.cacheReadTokens += u.cacheReadTokens;
+    usage.outputTokens += u.outputTokens;
+    usage.webSearches += u.webSearches;
+    usage.reportedUsd = (usage.reportedUsd ?? 0) + u.costUsd;
+    switch (out.stop) {
+      case "error":
+        fatal = out.error ?? "Claude Code run failed.";
+        bus.emit({ type: "error", at: now(), message: clip(fatal, 500) });
+        return;
+      case "refusal":
+        bus.emit({ type: "error", at: now(), message: "Claude declined this run (refusal). The sandbox carries on." });
+        return;
+      case "cap":
+        bus.emit({ type: "note", at: now(), text: `Coordinator stopped at the ${maxIterations}-request cap with work left.` });
+        return;
+      case "budget":
+        return;
+      case "done":
+        if (out.text) bus.emit({ type: "note", at: now(), text: `Fo (log): ${clip(out.text)}` });
     }
   };
 
@@ -684,7 +735,7 @@ export function createFoCoordinator(opts: CoordinatorOptions): FoCoordinator {
 }
 
 export async function runSandbox(opts: RunSandboxOptions): Promise<SandboxResult> {
-  const { scenario, anthropic, bus } = opts;
+  const { scenario, anthropic, backend, bus } = opts;
   const maxTurns = opts.maxCoordinatorTurns ?? 60;
   const budgetMs = opts.wallClockBudgetMs ?? 90 * 60_000;
   const speed = opts.speed ?? Infinity;
@@ -780,7 +831,8 @@ export async function runSandbox(opts: RunSandboxOptions): Promise<SandboxResult
   };
 
   const coordinator: FoCoordinator = createFoCoordinator({
-    anthropic,
+    ...(anthropic ? { anthropic } : {}),
+    ...(backend ? { backend } : {}),
     bus,
     clock,
     store,

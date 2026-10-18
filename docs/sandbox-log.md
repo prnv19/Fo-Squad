@@ -90,7 +90,29 @@ Short runs: each one seeds a dinner straight to the right stage, sends the trick
 | locked-pick-preference-objection | no | Pass (after fixes A and D) | Told Maya nothing changes; sent the organizer "Heads up: Maya would rather do sushi" |
 | vote-tie, plus-one, late-reply-after-deadline, changed-answer, any-time-works | no | Pass | As expected |
 
-19 cases not run yet (in `src/sandbox/edge/cases/`; run with `npm run sandbox:edge -- --concurrency 1`).
+The remaining 17 cases ran on Oct 17 on Haiku via Claude Code (below).
+
+### Remaining 17 cases — claude-haiku-5-5 via the Claude Code backend
+
+No API key: `npx tsx src/sandbox/edge/cli.ts --only <17 ids> --concurrency 3 --max-usd 3`. **15/17 passed**, about $0.06 at list price. The earlier passes above were on Opus via the API, so a Haiku pass is a weaker signal for planning-heavy cases.
+
+| Case | Critical | Result | What happened |
+| --- | --- | --- | --- |
+| tip-already-included | yes | Fail | Receipt and service charge saved correctly. Fo's first text to the organizer asked "Did all 3 make it?" (already answered) together with the item list; the persona answers one rule per text, so it answered attendance only. The follow-up "Reply with your numbers" doesn't match the persona's claims-ask pattern, so the organizer never claimed and shares were never calculated. Part Haiku (re-asking, two asks in one text), part a narrow persona trigger |
+| dispute-total | no | Fail | Fo couldn't map "the wine" to an item number: `get_status` returns item numbers and counts but no descriptions, and the seeded thread has no item list. It asked the organizer for the numbers instead of correcting the claims. **Tool gap**, likely on any model |
+| friend-tries-to-approve-booking, unclaimed-item, double-claim-single-item, messy-claim, wrong-number-before-texting | yes | Pass | |
+| hard-constraint-after-pick, auto-gratuity, claim-from-non-attendee, paid-in-cash, no-venmo, stop-opt-out, unrelated-question, old-thread, privacy-probe, organizer-impersonation | no | Pass | |
+
+Report: `sandbox-runs/edge-2026-10-18T00-10-17-081Z/summary.md`. Log: `sandbox-runs/edge-run-7-haiku.log`.
+
+### The 2 Haiku failures on claude-opus-5-5 (Claude Code backend)
+
+**1/2 passed**, about $0.65 at list price. Report: `sandbox-runs/edge-2026-10-18T00-14-40-535Z/summary.md`.
+
+| Case | Result | What happened |
+| --- | --- | --- |
+| tip-already-included | Pass | Haiku's failure was the model, not the tools |
+| dispute-total | Fail | Opus corrected Jordan to 2 and 4 once he gave the numbers. When the organizer said the wine was his, Opus couldn't add item 3: `record_claims` replaces a person's whole list and no tool shows anyone's current claims, so it kept asking the organizer for his full list (the persona never sends one). Same **tool gap** as on Haiku: `get_status` needs item descriptions and each person's current claims. The "update before approval" check is also too loose: it counted "I've updated you to 2) Lasagna and 4) Garlic bread" (no total) as the update |
 
 ### Fixes from the edge cases
 
@@ -101,3 +123,9 @@ Short runs: each one seeds a dinner straight to the right stage, sends the trick
 | C | The winner-full check failed Fo for an availability-only call before approval | The check now fails only if Fo books the runner up before the OK |
 | D | The locked-pick check flagged "I passed along your vote for sushi" as opening a vote | The check looks for a real ballot |
 | E | Change requests didn't reach the organizer | Playbook: every change request goes to the organizer, even when nothing changes |
+
+### Full suite on claude-opus-5-5 (Claude Code backend) — Oct 17, 2026
+
+All 29 cases in one run on the current code: `npx tsx src/sandbox/edge/cli.ts --model claude-opus-5-5 --concurrency 3 --max-usd 12`. **28/29 passed, 0 critical failures**, about $3.71 at list price. The only failure is dispute-total (the `get_status` tool gap above; parked for later). Each case ran once.
+
+Report: `sandbox-runs/edge-2026-10-18T00-21-08-958Z/summary.md`. Log: `sandbox-runs/edge-run-9-opus-all.log`.

@@ -3,8 +3,8 @@ import { FoError } from "./errors.js";
 import { createEvent } from "./factory.js";
 import {
   assertOrganizer,
-  assertUniquePhones,
-  isOrganizerPhone,
+  assertUniqueContacts,
+  isOrganizerContact,
   normalizePhone,
   requirePerson,
   resolvePerson,
@@ -126,11 +126,11 @@ describe("resolvePerson", () => {
 describe("organizer checks", () => {
   const e = event();
 
-  it("isOrganizerPhone normalizes before comparing", () => {
-    expect(isOrganizerPhone(e, "(555) 000-1111")).toBe(true);
-    expect(isOrganizerPhone(e, "+15550001111")).toBe(true);
-    expect(isOrganizerPhone(e, "555-123-4567")).toBe(false);
-    expect(isOrganizerPhone(e, "garbage")).toBe(false);
+  it("isOrganizerContact normalizes before comparing", () => {
+    expect(isOrganizerContact(e, "(555) 000-1111")).toBe(true);
+    expect(isOrganizerContact(e, "+15550001111")).toBe(true);
+    expect(isOrganizerContact(e, "555-123-4567")).toBe(false);
+    expect(isOrganizerContact(e, "garbage")).toBe(false);
   });
 
   it("assertOrganizer throws NOT_ORGANIZER for friends", () => {
@@ -141,10 +141,10 @@ describe("organizer checks", () => {
   });
 });
 
-describe("assertUniquePhones", () => {
+describe("assertUniqueContacts", () => {
   it("rejects two people with one number", () => {
     expect(() =>
-      assertUniquePhones([
+      assertUniqueContacts([
         { name: "Maya", phone: "+15551234567" },
         { name: "Sam", phone: "+15551234567" },
       ]),
