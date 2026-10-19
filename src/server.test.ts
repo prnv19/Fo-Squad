@@ -112,9 +112,8 @@ describe("MCP server", () => {
 });
 
 describe("startup time zone", () => {
-  it("prefers FO_SQUAD_TZ, then RUNNER_TZ, then the default", () => {
-    expect(readTimeZone({ FO_SQUAD_TZ: "America/Denver", RUNNER_TZ: "America/New_York" })).toBe("America/Denver");
-    expect(readTimeZone({ RUNNER_TZ: "America/New_York" })).toBe("America/New_York");
+  it("uses FO_SQUAD_TZ, else the default", () => {
+    expect(readTimeZone({ FO_SQUAD_TZ: "America/Denver" })).toBe("America/Denver");
     expect(readTimeZone({})).toBe("America/Los_Angeles");
   });
 

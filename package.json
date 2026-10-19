@@ -13,20 +13,14 @@
     "dev": "FO_SQUAD_ALLOW_NO_TOKEN=1 tsx watch src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "fo:login": "tsx src/runner/fo/login.ts",
-    "sandbox": "tsx src/sandbox/cli.ts",
-    "sandbox:demo": "tsx src/sandbox/demo.ts",
-    "sandbox:edge": "tsx src/sandbox/edge/cli.ts"
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.135.0",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "express": "^5.3.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.302",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.5",
     "tsx": "^4.23.15",

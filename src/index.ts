@@ -10,8 +10,6 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { createStore } from "./events/index.js";
 import { DEFAULT_TIME_ZONE, isTimeZone } from "./events/zone.js";
-import { createRunnerFromEnv, runnerEnabled, type DryRunHooks } from "./runner/factory.js";
-import type { RunnerHealth } from "./runner/runner.js";
 import { createMcpServer } from "./server.js";
 import { FoSquadService } from "./service.js";
 
@@ -19,10 +17,6 @@ export interface AppOptions {
   service: FoSquadService;
   /** When set, /mcp needs "Authorization: Bearer <token>" or the /mcp/<token> path. */
   token?: string;
-  /** Adds `runner` to /health. Omitted: /health is just { ok: true }. */
-  runnerHealth?: () => RunnerHealth;
-  /** FO_RUNNER_DRY=1 only: POST /runner/dry/inbound { from, text } fakes a text to Fo. */
-  dryRun?: DryRunHooks;
   /** One line per MCP request and tool call. Never the token, arguments or results. */
   log?: (line: string) => void;
 }
@@ -67,12 +61,9 @@ export function readToken(env: NodeJS.ProcessEnv = process.env): string | undefi
   );
 }
 
-/**
- * The zone the server places day-of reminders in: FO_SQUAD_TZ, else RUNNER_TZ
- * (so a runner deployment needs only one), else the runner's default.
- */
+/** The zone the server places day-of reminders in: FO_SQUAD_TZ, else the default. */
 export function readTimeZone(env: NodeJS.ProcessEnv = process.env): string {
-  const zone = env.FO_SQUAD_TZ?.trim() || env.RUNNER_TZ?.trim() || DEFAULT_TIME_ZONE;
+  const zone = env.FO_SQUAD_TZ?.trim() || DEFAULT_TIME_ZONE;
   if (!isTimeZone(zone)) {
     throw new StartupError(`Time zone "${zone}" isn't a known IANA name (use one like America/Denver).`);
   }
@@ -91,7 +82,7 @@ function jsonRpcError(res: Response, status: number, code: number, message: stri
   res.status(status).json({ jsonrpc: "2.0", error: { code, message }, id: null });
 }
 
-export function createApp({ service, token, runnerHealth, dryRun, log }: AppOptions): Express {
+export function createApp({ service, token, log }: AppOptions): Express {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "1mb" }));
@@ -111,7 +102,7 @@ export function createApp({ service, token, runnerHealth, dryRun, log }: AppOpti
   }
 
   app.get("/health", (_req, res) => {
-    res.json(runnerHealth ? { ok: true, runner: runnerHealth() } : { ok: true });
+    res.json({ ok: true });
   });
 
   // Claude.ai custom connectors can't send headers, so the token may also
@@ -156,18 +147,6 @@ export function createApp({ service, token, runnerHealth, dryRun, log }: AppOpti
     app.delete(path, auth, notAllowed);
   }
 
-  if (dryRun) {
-    // Rehearsal only: the fake Fo client has no real inbox, so texts are injected here.
-    app.post("/runner/dry/inbound", auth, (req: Request, res: Response) => {
-      const { from, text } = (req.body ?? {}) as { from?: unknown; text?: unknown };
-      if (typeof from !== "string" || !from.trim() || typeof text !== "string" || !text.trim()) {
-        return void res.status(400).json({ ok: false, error: "Send JSON { from, text }." });
-      }
-      dryRun.inbound(from.trim(), text);
-      res.json({ ok: true, queued: true });
-    });
-  }
-
   return app;
 }
 
@@ -186,22 +165,8 @@ async function main(): Promise<void> {
   const token = readToken(); // throws a clear message when missing or weak
   const port = Number(process.env.PORT) || 3000;
 
-  // Same process as the MCP server, so the runner shares the store and the per-event locks.
-  let runnerHealth: () => RunnerHealth = () => ({ enabled: false, lastTickAt: null, lastError: null });
-  let dryRun: DryRunHooks | undefined;
-  if (runnerEnabled()) {
-    const built = createRunnerFromEnv({ service, store }); // throws a clear message on bad config
-    built.runner.start();
-    runnerHealth = () => built.runner.health();
-    dryRun = built.dryRun;
-    const c = built.config;
-    console.error(
-      `[fo-squad] runner on${c.dryRun ? " (DRY RUN: nothing is texted)" : ""}: every ${c.intervalMs}ms, ${c.timeZone}, ${c.organizerPhones.length} organizer number(s)`,
-    );
-  }
-
   const log = (line: string) => console.error(`[fo-squad] ${new Date().toISOString()} ${line}`);
-  const app = createApp({ service, runnerHealth, log, ...(dryRun ? { dryRun } : {}), ...(token ? { token } : {}) });
+  const app = createApp({ service, log, ...(token ? { token } : {}) });
   app.listen(port, (err?: Error) => {
     if (err) {
       console.error("[fo-squad] failed to start:", err);

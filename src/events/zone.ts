@@ -1,6 +1,5 @@
 // Time zone math (Intl only, no dependencies) and the booked-stage timer rules,
-// shared by get_status, confirm_booking and the headless runner so they all
-// name the same moments.
+// shared by get_status and confirm_booking so they name the same moments.
 
 export const DEFAULT_TIME_ZONE = "America/Los_Angeles";
 

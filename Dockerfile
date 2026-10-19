@@ -9,8 +9,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
-# The sandbox is a local test tool; the server never loads it.
-RUN npm run build && rm -rf dist/sandbox
+RUN npm run build
 
 # Runtime stage: production deps and compiled output only, owned by root and
 # read-only to the app user, so a compromised process can't rewrite its code.

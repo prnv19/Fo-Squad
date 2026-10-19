@@ -62,7 +62,7 @@ flowchart LR
 
 - **Fo** handles every conversation, reads receipt photos and interprets messy replies.
 - **The MCP server** holds all state, rules and math. Fo calls it at every step.
-- **Standing instructions** ([docs/standing-instructions.md](docs/standing-instructions.md)) are pasted into Fo and tell it which tool to call at each stage.
+- **Standing instructions** ([docs/standing-instructions.md](docs/standing-instructions.md)) tell Fo which tool to call at each stage. The server hands them to Fo itself (`get_playbook` and the MCP instructions), so there's nothing to paste.
 
 ## The six stages
 
@@ -74,7 +74,7 @@ Every event moves through these stages. `get_status` always returns the current 
 | Voting | Friends picking the restaurant |
 | Booked | Reservation confirmed, reminder scheduled |
 | Claiming | Receipt uploaded, collecting who had what |
-| Paying | Totals and Venmo links sent |
+| Paying | Totals calculated, waiting for the organizer's yes |
 | Settled | Totals and Venmo links went out, or the organizer covered the bill |
 
 A receipt can be added from any stage before Paying, so a split-only night works without any planning.
@@ -150,45 +150,71 @@ Also handled: discounts and comps (negative amounts shared proportionally), tips
 
 **No reply.** Two-hour deadline, one nudge, then decide with whoever answered.
 
-## Quick start
+## Try it with Fo
 
-The full step-by-step guide (local testing, the sandbox, a quick live test, deploying to Fly or Render, connecting Fo) is in [docs/RUNNING.md](docs/RUNNING.md).
+You need Docker, a Wajo account with Fo, and a way to give the server a public HTTPS URL (the steps use a free Cloudflare quick tunnel).
 
-Requires Node 20 or later.
+**Fo's actions are real.** Its texts and emails really go out, so try it with phone numbers and email addresses you own, and tell Fo not to call or book any restaurant.
 
-```sh
-npm install
-npm test                    # Vitest suite
-npm run dev                 # watch mode with tsx
-npm run build && npm start  # production build
-```
-
-The server speaks MCP over Streamable HTTP (stateless) at `POST /mcp` on `PORT` (default 3000). `GET /health` returns a health check. `node dist/index.js --stdio` runs it over stdio instead, for Claude Desktop or Claude Code.
+### 1. Build and start the server
 
 ```sh
-curl http://localhost:3000/health
-npx @modelcontextprotocol/inspector   # connect to http://localhost:3000/mcp
+git clone https://github.com/prnv19/Fo-Squad.git && cd Fo-Squad
+docker build -t fo-squad .
+
+export FO_SQUAD_TOKEN=$(openssl rand -hex 32); echo "$FO_SQUAD_TOKEN"   # keep it: it goes in Fo's URL
+docker run -d --name fo-squad -p 127.0.0.1:3000:3000 \
+  -e FO_SQUAD_TOKEN -e FO_SQUAD_TZ=America/Denver \
+  --user node --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+  --mount type=volume,src=fo_squad_data,dst=/data fo-squad
+docker logs fo-squad   # listening on :3000, POST /mcp (token required), store: files in /data
 ```
+
+Set `FO_SQUAD_TZ` to your time zone; it's where day-of reminders are placed. Dinners live on the `fo_squad_data` volume, so they survive restarts.
+
+### 2. Give it a public URL
+
+```sh
+brew install cloudflared   # or see developers.cloudflare.com for other platforms
+cloudflared tunnel --url http://localhost:3000   # prints https://<random-words>.trycloudflare.com
+```
+
+Leave it running, and check `https://<random-words>.trycloudflare.com/health` shows `{"ok":true}`. The URL changes each time the tunnel restarts. For a permanent URL, see [Deploy](#deploy).
+
+### 3. Connect it to Fo
+
+In Wajo, add an MCP server with this URL:
+
+```
+https://<random-words>.trycloudflare.com/mcp/<FO_SQUAD_TOKEN>
+```
+
+The token goes in the path because Wajo's form only takes a URL. Treat the URL like a password: anyone who has it can read and change every dinner. A wrong token gets 401.
+
+Then ask Fo: *"Call get_status on Fo Squad with email you@example.com."* A reply saying there's no active dinner (`found: false`) means Fo reached the server.
+
+### 4. Plan a dinner or split a bill
+
+Talk to Fo as the organizer, by text or email:
+
+- *"Plan dinner Saturday with Lee (lee@example.com) and Kim (kim@example.com). Times: 6pm or 7:30pm. Don't call or book any restaurant, I'll book it myself."*
+- Or email Fo a receipt photo: *"Split this lunch. It was me, Lee and Kim. I paid, my Venmo is your-handle. I had the burrito."*
+
+Fo reads the playbook from the server, asks you to confirm before messaging anyone, emails each friend one on one, and checks with you before sending totals. `docker logs -f fo-squad` shows each tool call as it happens.
 
 ### Environment variables
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `FO_SQUAD_TOKEN` | **required** | 32+ characters (`openssl rand -hex 32`). Send it as `Authorization: Bearer <token>`, or put it in the URL as `/mcp/<token>` for clients that can't send headers (like Wajo). The server won't start without it |
+| `FO_SQUAD_TZ` | `America/Los_Angeles` | IANA time zone for day-of reminders |
+| `DATA_DIR` | `/data` in Docker, else in-memory | Where dinners are saved. Mount a volume here, or data is lost on restart |
 | `PORT` | `3000` | HTTP port |
-| `DATA_DIR` | unset (in-memory) | Directory for persisted events. On Render or Fly it must point at a mounted volume, or data is lost on restart |
-| `FO_SQUAD_TOKEN` | **required** | Bearer token, 32+ characters (`openssl rand -hex 32`). Requests to `/mcp` must send `Authorization: Bearer <token>`, or use `/mcp/<token>` as the URL for clients that can't send headers (Claude.ai custom connectors), so only Fo can call the server. The server refuses to start without it; `npm run dev` opts out with `FO_SQUAD_ALLOW_NO_TOKEN=1` for local development |
-| `ANTHROPIC_API_KEY` | unset | Claude credential for the runner's brain (required when `FO_RUNNER=1`). Also reserved for the stretch `propose_compromise` tool |
-| `FO_RUNNER` | unset | `1` starts the headless [runner](docs/runner.md) in the same process |
-| `ORGANIZER_PHONES` | unset | Runner only, required: comma-separated numbers allowed to start a dinner by texting Fo |
-| `FO_MCP_URL` | `https://mcp.api.wajo.ai/fo` | Runner only: Fo's MCP server |
-| `FO_OAUTH_FILE` | `$DATA_DIR/fo-oauth.json` | Runner only: Fo sign-in token file from `npm run fo:login` |
-| `RUNNER_INTERVAL_MS` | `60000` | Runner only: how often it checks Fo's threads and timers |
-| `RUNNER_TZ` | `America/Los_Angeles` | Runner only: time zone for quiet hours (9pm to 9am) and reminders |
-| `FO_RUNNER_DRY` | unset | Runner only: `1` uses a fake Fo client that logs what it would send, for rehearsals |
+| `FO_SQUAD_ALLOW_NO_TOKEN` | unset | `1` runs without a token. Local development only (`npm run dev` sets it) |
 
 ## Deploy
 
-A `Dockerfile` is included, and both configs below mount persistent storage at `/data` with `DATA_DIR=/data`.
+For a permanent URL, both configs below build the same `Dockerfile` and mount persistent storage at `/data`.
 
 **Render**
 
@@ -202,23 +228,22 @@ A `Dockerfile` is included, and both configs below mount persistent storage at `
 3. `fly secrets set FO_SQUAD_TOKEN=$(openssl rand -hex 32)`
 4. `fly deploy`
 
-## Two ways to run it
+Then use `https://<your-host>/mcp/<FO_SQUAD_TOKEN>` in Wajo.
 
-1. **Fo calls the MCP server directly** (preferred). Fo follows the [standing instructions](docs/standing-instructions.md) and calls the tools at every step. Setup is below.
-2. **The runner relays.** If Fo can't call the server, set `FO_RUNNER=1` and the server also runs a loop that watches Fo's SMS threads through Fo's MCP server, asks Claude what to do with these same tools, and has Fo deliver the texts. The runner is text-only: people with just an email are left to Fo. It owns every timer (nudges, day-of reminders, payment reminders), so nothing depends on someone checking in. See [docs/runner.md](docs/runner.md), and paste [docs/fo-setup.md](docs/fo-setup.md) into Fo's settings.
+## Development
 
-## Connecting to Fo
+Requires Node 20 or later.
 
-Step-by-step walkthrough, including a scripted test lunch over email: [docs/RUNNING.md, section 2](docs/RUNNING.md#2-connect-to-wajo-and-test-with-the-real-fo).
+```sh
+npm install
+npm test                    # Vitest suite
+npm run dev                 # watch mode, no token
+npm run build && npm start  # production build
+```
 
-1. Register the server's MCP URL (`https://<your-host>/mcp`) in Fo, with the bearer token if you set one. If the client can't send headers, use `https://<your-host>/mcp/<token>`.
-2. Paste [docs/standing-instructions.md](docs/standing-instructions.md) into Fo as standing instructions.
-3. Smoke test: ask Fo to call `get_status` on Fo Squad. A clean `found: false` ("No active dinner for this number") response means the connection works.
-4. Text Fo a dinner request, or a receipt photo for a split-only night.
+`node dist/index.js --stdio` runs the server over stdio, for Claude Desktop or Claude Code. `npx @modelcontextprotocol/inspector` can connect to `http://localhost:3000/mcp`.
 
-## Fallback
-
-If Fo can't call the MCP server directly, run the same workflow from a Claude chat with the Fo connector and this server connected. The planning and split logic carry over unchanged.
+This `main` branch is just the server. The [`dev`](https://github.com/prnv19/Fo-Squad/tree/dev) branch adds the development tooling: a sandbox where Claude plays Fo, an automated edge-case suite, a headless runner, live-test notes and the planning docs.
 
 ## Project layout
 
@@ -230,7 +255,7 @@ src/events/        Event store and stage tracker
 src/service.ts     Every tool's business rules (no MCP imports)
 src/server.ts      MCP tool definitions
 src/index.ts       HTTP entry point (/mcp, /health) and --stdio
-docs/              Tool contract and standing instructions
+docs/              Tool contract and standing instructions (served to Fo)
 ```
 
 Tests live next to the code as `src/**/*.test.ts`.
@@ -243,7 +268,7 @@ Tests live next to the code as `src/**/*.test.ts`.
 - **Nothing irreversible without approval.** Fo confirms with the organizer before booking, paying a deposit or sending totals. Fo never moves money between friends; it only sends pay links.
 - **STOP is honored.** `record_opt_out` marks the person (STOP by text, unsubscribe by email), and Fo never messages them again.
 - **Required bearer token** (`FO_SQUAD_TOKEN`, 32+ characters) keeps anyone but Fo from calling the server. The server fails closed: no token or a weak one is a startup error. The token is compared in constant time and never logged.
-- **Locked-down container.** The server runs as the unprivileged `node` user with no-new-privileges; its code and dependencies are read-only to it, and only `/data` is writable. The base image is pinned by digest, install scripts are off, and dev-only packages (the sandbox and Agent SDK) aren't in the image.
+- **Locked-down container.** The server runs as the unprivileged `node` user with no-new-privileges; its code and dependencies are read-only to it, and only `/data` is writable. The base image is pinned by digest, install scripts are off, and dev-only packages aren't in the image.
 
 ## Known limitations
 
@@ -254,9 +279,8 @@ Tests live next to the code as `src/**/*.test.ts`.
 - Restaurants that need a card to hold the table use Fo's card, only after the organizer approves.
 - If a restaurant won't deal with a bot, a person at Wajo finishes the booking, which can take longer.
 - Cancellation and no-show fees are reported to the organizer at booking but not split automatically.
-- Payments aren't tracked: the dinner finishes when the totals and Venmo links go out. Tracking who paid is a future direction (`docs/future-payment-tracking.md`).
+- Payments aren't tracked: the dinner finishes when the totals and Venmo links go out. Tracking who paid is a future direction (see the `dev` branch).
 - Messy claim replies depend on Fo's interpretation, which is why Fo confirms them back before saving.
-- The private compromise step (`propose_compromise`) is a stretch goal.
 
 ## Credits
 

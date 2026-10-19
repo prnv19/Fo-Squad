@@ -1,8 +1,7 @@
 // The single definition of every Fo Squad tool: name, description, input
 // shape and which service method runs it. src/server.ts registers these with
-// MCP and src/runner/actions.ts hands them to the headless brain, so the two
-// can never drift apart. Descriptions are what the caller reads to decide when
-// to call a tool, so they say when and what comes back.
+// MCP. Descriptions are what the caller reads to decide when to call a tool,
+// so they say when and what comes back.
 
 import { z } from "zod";
 import { isFoError } from "./events/index.js";
@@ -332,9 +331,6 @@ export const TOOLS: readonly ToolDef[] = [
   }),];
 
 export const TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
-
-/** Every tool but get_playbook, for callers that already put the playbook in the model's prompt (runner, sandbox). */
-export const WORK_TOOLS: readonly ToolDef[] = TOOLS.filter((t) => t.name !== "get_playbook");
 
 export function getTool(name: string): ToolDef | undefined {
   return TOOLS.find((t) => t.name === name);
