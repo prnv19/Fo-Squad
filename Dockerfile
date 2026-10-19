@@ -22,7 +22,7 @@ COPY --from=build /app/dist ./dist
 # get_playbook serves this to Fo (Wajo has no place for standing instructions).
 COPY docs/standing-instructions.md ./docs/standing-instructions.md
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-# Mount a persistent volume here (fly.toml / render.yaml do); without one, state is lost on restart.
+# Mount a persistent volume here (compose.yaml does); without one, state is lost on restart.
 ENV DATA_DIR=/data
 RUN mkdir -p /data && chown node:node /data && chmod 700 /data
 EXPOSE 3000

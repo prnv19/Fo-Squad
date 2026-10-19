@@ -1,0 +1,32 @@
+# Fo Squad on your machine: the MCP server plus a Cloudflare quick tunnel that
+# gives it a public HTTPS URL for Fo. Put FO_SQUAD_TOKEN in .env first (see README).
+#   docker compose up -d --build
+#   docker compose logs tunnel | grep trycloudflare.com   # the public URL
+
+services:
+  fo-squad:
+    build: .
+    image: fo-squad
+    restart: unless-stopped
+    environment:
+      FO_SQUAD_TOKEN: ${FO_SQUAD_TOKEN:?Set FO_SQUAD_TOKEN in .env (openssl rand -hex 32)}
+      FO_SQUAD_TZ: ${FO_SQUAD_TZ:-America/Los_Angeles}
+    ports:
+      - "127.0.0.1:3000:3000" # local checks only; Fo reaches it through the tunnel
+    volumes:
+      - fo_squad_data:/data
+    # Locked down: unprivileged user, read-only filesystem except /data and /tmp.
+    user: node
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  tunnel:
+    image: cloudflare/cloudflared:2026.10.1
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://fo-squad:3000
+    depends_on: [fo-squad]
+
+volumes:
+  fo_squad_data:

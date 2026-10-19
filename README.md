@@ -4,6 +4,8 @@ An MCP server that gives Fo the brain for group dinners: fair decisions on time,
 
 **Fo is the hands, we built the brain.** Fo does all the talking with the organizer, each friend and the restaurant. This server picks the time, counts the votes, does the split math and tracks where every dinner stands.
 
+**Try it:** run it in Docker and connect it to Fo in Wajo, step by step in [Try it yourself](#try-it-yourself).
+
 ## The problem
 
 Planning a group dinner takes dozens of messages, and someone always ends up chasing friends for money afterward. Language models are good at the conversations but shouldn't be trusted with the decisions or the arithmetic. Fo Squad splits the job: Fo talks, and deterministic, tested code decides and calculates.
@@ -43,6 +45,95 @@ Fo → You:    Sent! Everyone has their total and your Venmo link. Night complet
 ```
 
 "Fo → All" means the same message sent to each friend in their own thread.
+
+## Try it yourself
+
+Run the server in Docker on your machine, connect it to Fo in Wajo, and plan a dinner. It takes about 10 minutes.
+
+**You need:** Docker (Docker Desktop on a Mac), a Wajo account with Fo, and a few email addresses or phone numbers you own to play the friends.
+
+> **Fo's actions are real.** Its emails, texts and calls really go out. Use contacts you own for the friends, and give Fo a number you control for the restaurant call (or tell it you'll book yourself).
+
+### 1. Get the code and make a token
+
+```sh
+git clone https://github.com/prnv19/Fo-Squad.git && cd Fo-Squad
+echo "FO_SQUAD_TOKEN=$(openssl rand -hex 32)" > .env
+echo "FO_SQUAD_TZ=America/Denver" >> .env      # your time zone, for day-of reminders
+```
+
+The token keeps anyone but Fo from using your server. `.env` is git-ignored; keep it private.
+
+### 2. Start the server and its public URL
+
+```sh
+docker compose up -d --build
+curl http://localhost:3000/health              # {"ok":true}
+```
+
+This starts two containers from [`compose.yaml`](compose.yaml): `fo-squad`, the MCP server (locked down: unprivileged user, read-only filesystem, dinners saved on the `fo_squad_data` volume), and `tunnel`, a free Cloudflare quick tunnel that gives it a public HTTPS address so Fo can reach it. Nothing else needs installing.
+
+### 3. Get the URL for Fo
+
+```sh
+URL=$(docker compose logs tunnel | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' | tail -1)
+curl "$URL/health"                             # {"ok":true} from the internet
+echo "$URL/mcp/$(grep FO_SQUAD_TOKEN .env | cut -d= -f2)"
+```
+
+The last line prints your connector URL: `https://<random-words>.trycloudflare.com/mcp/<token>`. The token is in the path because Wajo's form only takes a URL, so treat the whole URL like a password. A wrong token gets 401.
+
+### 4. Connect it to Fo
+
+1. In Wajo, add a custom MCP server (connector) named **Fo Squad** with the URL from step 3.
+2. Check that Fo can reach it. Ask Fo: *"Call get_status on Fo Squad with email you@example.com."* A reply that there's no active dinner (`found: false`) means it worked.
+
+Fo gets its rules from the server (`get_playbook` and the MCP instructions), so there's nothing to paste into Fo.
+
+### 5. Plan a dinner
+
+Message Fo as the organizer, by email or text, for example:
+
+> Hi Fo, please plan dinner Saturday in Denver for me, Lee (lee@example.com), Ravi (ravi@example.com) and Kim (kim@example.com). Time options: A) Sat 7pm, B) Sat 8pm. About $50 a person. Shortlist real Denver restaurants for us to vote on, and book the winner by phone once I say yes. For this test, call 555-0100 (my friend playing the restaurant) instead of the real restaurant. My Venmo is your-handle.
+
+Fo creates the dinner, asks you to confirm the guest list, then emails each friend one on one.
+
+**One Wajo rule to know:** Fo won't use connected apps like Fo Squad in a conversation that includes other people. So when friends reply, Fo answers them but can't record what they said. After each round, catch Fo Squad up from your own chat with Fo:
+
+> Please record everyone's replies from the Saturday dinner emails in Fo Squad (times, food preferences, dietary needs), then run the time pick.
+
+Do the same after the vote (*"record the votes and tally them"*) and after people say what they ordered (*"record everyone's claims"*). Fo Squad does the deciding and the math; Fo does the talking.
+
+### 6. Split the bill
+
+After dinner, email Fo the receipt photo:
+
+> Dinner's done, all four of us came, I paid. Receipt attached. I had the pasta and half the tiramisu with Kim. Send everyone the item list, and show me the totals before anything goes out.
+
+Fo reads the receipt into Fo Squad (which checks that it adds up), asks each friend what they had, and shows you every total. On your yes, each friend gets their own total with a Venmo link. Totals are exact to the cent.
+
+### Watch, restart, stop
+
+```sh
+docker compose logs -f fo-squad    # every tool call Fo makes, without arguments or contact details
+docker compose down                # stop; dinners stay on the fo_squad_data volume
+docker compose up -d               # start again
+docker compose down -v             # stop and delete all dinners
+```
+
+The quick tunnel's URL changes whenever the `tunnel` container restarts (including after `down` and `up`), so update the connector in Wajo with the new URL from step 3. Restarting only the server (`docker compose restart fo-squad`) keeps the URL. Your machine has to stay on and awake while Fo uses it.
+
+### Environment variables
+
+Set these in `.env`.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FO_SQUAD_TOKEN` | **required** | 32+ characters (`openssl rand -hex 32`). Sent as `Authorization: Bearer <token>`, or in the URL as `/mcp/<token>` for clients that can't send headers (like Wajo). The server won't start without it |
+| `FO_SQUAD_TZ` | `America/Los_Angeles` | IANA time zone for day-of reminders |
+| `FO_SQUAD_CLOCK_OFFSET_HOURS` | unset | Demo only: runs the server's clock this many hours ahead, so you can add a receipt for a dinner that's "already happened". Add it to `fo-squad`'s `environment` in `compose.yaml` |
+
+Inside the container, `DATA_DIR` is `/data` (the volume) and `PORT` is `3000`.
 
 ## Architecture
 
@@ -150,86 +241,6 @@ Also handled: discounts and comps (negative amounts shared proportionally), tips
 
 **No reply.** Two-hour deadline, one nudge, then decide with whoever answered.
 
-## Try it with Fo
-
-You need Docker, a Wajo account with Fo, and a way to give the server a public HTTPS URL (the steps use a free Cloudflare quick tunnel).
-
-**Fo's actions are real.** Its texts and emails really go out, so try it with phone numbers and email addresses you own, and tell Fo not to call or book any restaurant.
-
-### 1. Build and start the server
-
-```sh
-git clone https://github.com/prnv19/Fo-Squad.git && cd Fo-Squad
-docker build -t fo-squad .
-
-export FO_SQUAD_TOKEN=$(openssl rand -hex 32); echo "$FO_SQUAD_TOKEN"   # keep it: it goes in Fo's URL
-docker run -d --name fo-squad -p 127.0.0.1:3000:3000 \
-  -e FO_SQUAD_TOKEN -e FO_SQUAD_TZ=America/Denver \
-  --user node --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
-  --mount type=volume,src=fo_squad_data,dst=/data fo-squad
-docker logs fo-squad   # listening on :3000, POST /mcp (token required), store: files in /data
-```
-
-Set `FO_SQUAD_TZ` to your time zone; it's where day-of reminders are placed. Dinners live on the `fo_squad_data` volume, so they survive restarts.
-
-### 2. Give it a public URL
-
-```sh
-brew install cloudflared   # or see developers.cloudflare.com for other platforms
-cloudflared tunnel --url http://localhost:3000   # prints https://<random-words>.trycloudflare.com
-```
-
-Leave it running, and check `https://<random-words>.trycloudflare.com/health` shows `{"ok":true}`. The URL changes each time the tunnel restarts. For a permanent URL, see [Deploy](#deploy).
-
-### 3. Connect it to Fo
-
-In Wajo, add an MCP server with this URL:
-
-```
-https://<random-words>.trycloudflare.com/mcp/<FO_SQUAD_TOKEN>
-```
-
-The token goes in the path because Wajo's form only takes a URL. Treat the URL like a password: anyone who has it can read and change every dinner. A wrong token gets 401.
-
-Then ask Fo: *"Call get_status on Fo Squad with email you@example.com."* A reply saying there's no active dinner (`found: false`) means Fo reached the server.
-
-### 4. Plan a dinner or split a bill
-
-Talk to Fo as the organizer, by text or email:
-
-- *"Plan dinner Saturday with Lee (lee@example.com) and Kim (kim@example.com). Times: 6pm or 7:30pm. Don't call or book any restaurant, I'll book it myself."*
-- Or email Fo a receipt photo: *"Split this lunch. It was me, Lee and Kim. I paid, my Venmo is your-handle. I had the burrito."*
-
-Fo reads the playbook from the server, asks you to confirm before messaging anyone, emails each friend one on one, and checks with you before sending totals. `docker logs -f fo-squad` shows each tool call as it happens.
-
-### Environment variables
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `FO_SQUAD_TOKEN` | **required** | 32+ characters (`openssl rand -hex 32`). Send it as `Authorization: Bearer <token>`, or put it in the URL as `/mcp/<token>` for clients that can't send headers (like Wajo). The server won't start without it |
-| `FO_SQUAD_TZ` | `America/Los_Angeles` | IANA time zone for day-of reminders |
-| `DATA_DIR` | `/data` in Docker, else in-memory | Where dinners are saved. Mount a volume here, or data is lost on restart |
-| `PORT` | `3000` | HTTP port |
-| `FO_SQUAD_ALLOW_NO_TOKEN` | unset | `1` runs without a token. Local development only (`npm run dev` sets it) |
-
-## Deploy
-
-For a permanent URL, both configs below build the same `Dockerfile` and mount persistent storage at `/data`.
-
-**Render**
-
-1. Create a Blueprint from this repo; `render.yaml` defines the web service and a disk mounted at `/data`. Render sets `PORT` for you.
-2. Set `FO_SQUAD_TOKEN` to the output of `openssl rand -hex 32`. The service won't start without it.
-
-**Fly.io**
-
-1. `fly launch --no-deploy` (keeps the included `fly.toml`, which mounts `fo_squad_data` at `/data` and sets `DATA_DIR`).
-2. `fly volumes create fo_squad_data --size 1`
-3. `fly secrets set FO_SQUAD_TOKEN=$(openssl rand -hex 32)`
-4. `fly deploy`
-
-Then use `https://<your-host>/mcp/<FO_SQUAD_TOKEN>` in Wajo.
-
 ## Development
 
 Requires Node 20 or later.
@@ -281,6 +292,7 @@ Tests live next to the code as `src/**/*.test.ts`.
 - Cancellation and no-show fees are reported to the organizer at booking but not split automatically.
 - Payments aren't tracked: the dinner finishes when the totals and Venmo links go out. Tracking who paid is a future direction (see the `dev` branch).
 - Messy claim replies depend on Fo's interpretation, which is why Fo confirms them back before saving.
+- Fo won't use Fo Squad in a conversation with other people (a Wajo rule), so the organizer catches it up on friends' replies from their own chat with Fo (see [step 5](#5-plan-a-dinner)).
 
 ## Credits
 
