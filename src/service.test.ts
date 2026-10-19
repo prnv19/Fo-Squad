@@ -466,6 +466,40 @@ describe("receipts come from the organizer", () => {
   });
 });
 
+describe("ballot is fixed once voting starts", () => {
+  it("refuses to replace the restaurant options after a vote is in", async () => {
+    const { id } = await create();
+    await planToVoting(id);
+    ok(await svc.recordVote({ event_id: id, person: "Maya", option: "1" }));
+    await expect(svc.setRestaurantOptions({ event_id: id, options: [{ name: "Somewhere Else" }] })).rejects.toMatchObject({ code: "PLAN_LOCKED" });
+    expect((await store.get(id))!.votes).toHaveLength(1);
+  });
+});
+
+describe("joining after the time is set", () => {
+  it("lets someone who couldn't make the chosen time say they can, and counts them for the vote", async () => {
+    const { id } = await create();
+    ok(await svc.recordPreferences({ event_id: id, person: "Maya", slot_ids: ["B"] }));
+    for (const name of ["Jordan", "Sam", "Priya"]) ok(await svc.recordPreferences({ event_id: id, person: name, slot_ids: ["C"] }));
+    ok(await svc.recordPreferences({ event_id: id, person: "Alex", slot_ids: [], any_time: true }));
+    ok(await svc.recordPreferences({ event_id: id, person: "Pranav", slot_ids: [], any_time: true }));
+    let pick = ok(await svc.pickTime({ event_id: id }));
+    if (pick.status === "check_shift") {
+      ok(await svc.recordPreferences({ event_id: id, person: "Maya", slot_ids: ["B"] })); // "no, still only B"
+      pick = ok(await svc.pickTime({ event_id: id, force: true }));
+    }
+    const chosen = (await store.get(id))!.chosenSlotId!;
+    expect(chosen).toBe("C");
+    // Too late for anything else, but "I'll make C work" gets her in.
+    await expect(svc.recordPreferences({ event_id: id, person: "Maya", slot_ids: ["B"], cuisines: ["thai"] })).rejects.toMatchObject({ code: "PLAN_LOCKED" });
+    const joined = ok(await svc.recordPreferences({ event_id: id, person: "Maya", slot_ids: ["C"] }));
+    expect(joined).toMatchObject({ joined: true, person: { name: "Maya" } });
+    expect(joined.next_action).toMatch(/^Maya can make Sat 7:30pm after all and is in\./);
+    ok(await svc.setRestaurantOptions({ event_id: id, options: [{ name: "Luigi's" }, { name: "Tavola" }] }));
+    expect(ok(await svc.getStatus({ event_id: id })).pending).toEqual(expect.arrayContaining([expect.objectContaining({ name: "Maya" })]));
+  });
+});
+
 describe("several open dinners", () => {
   it("get_status by contact lists the other open dinners that contact is in", async () => {
     const first = await create();
