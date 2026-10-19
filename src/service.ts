@@ -867,6 +867,16 @@ export class FoSquadService {
       assertCanText(person);
       // Someone pick_time asked about shifting can still answer after the reply deadline.
       const askedToShift = e.shiftCheck?.asks.some((a) => a.personId === person.id) ?? false;
+      // After the time is set, someone who couldn't make it can still say they now can ("I'll make 7 work").
+      // They join; nothing else about the plan changes.
+      const chosen = e.chosenSlotId;
+      const saysChosen = args.any_time || args.slot_ids.some((s) => s.trim().toUpperCase() === chosen);
+      if (chosen && ["planning", "voting", "booked"].includes(e.stage) && saysChosen && !canMakeChosenSlot(e, person)) {
+        const prev = e.preferences.find((x) => x.personId === person.id)!;
+        const pref: Preferences = { ...prev, slotIds: [...new Set([...prev.slotIds, chosen])].sort(), anyTime: prev.anyTime || !!args.any_time, updatedAt: nowIso };
+        e.preferences = [...e.preferences.filter((x) => x.personId !== person.id), pref];
+        return { event: e, data: { person, pref: pref as Preferences, joined: true as boolean } };
+      }
       if (e.stage !== "planning" || e.chosenSlotId || (isLateReply(e.replyDeadline, nowIso) && !askedToShift)) {
         throw this.planLocked(e);
       }
@@ -906,10 +916,20 @@ export class FoSquadService {
       if (askedToShift && !e.shiftCheck!.answeredIds.includes(person.id)) {
         e.shiftCheck!.answeredIds = [...e.shiftCheck!.answeredIds, person.id];
       }
-      return { event: e, data: { person, pref: unchanged ? prev : pref } };
+      return { event: e, data: { person, pref: unchanged ? prev : pref, joined: false as boolean } };
     });
 
     const p = data.pref;
+    if (data.joined) {
+      const when = slotLabel(event, event.chosenSlotId!) ?? event.chosenSlotId;
+      const next =
+        event.stage === "booked"
+          ? `${data.person.name} can make ${when} after all. Tell the organizer: the booking is for ${event.booking?.partySize ?? "the old party size"}, so the restaurant needs a bigger table (confirm_booking again with the new party_size once it's sorted).`
+          : event.stage === "voting"
+            ? `${data.person.name} can make ${when} after all and is in. Send them the restaurant vote too, and count their vote.`
+            : `${data.person.name} can make ${when} after all and is in.`;
+      return this.ok(event, { person: { id: data.person.id, name: data.person.name }, joined: true, chosen_slot: when }, next);
+    }
     return this.ok(event, {
       person: { id: data.person.id, name: data.person.name },
       saved: {
@@ -1165,6 +1185,15 @@ export class FoSquadService {
       assertStage(e, ["planning", "voting"], "set restaurant options");
       if (!e.chosenSlotId) throw new FoError("WRONG_STAGE", "Pick the time first with pick_time, then set restaurant options.");
       if (args.options.length === 0) throw invalid("Send at least one restaurant option.");
+      // Swapping the ballot mid-vote would silently throw away everyone's votes (seen live:
+      // a second Fo thread replaced the ballot right after the tally).
+      if (e.votes.length > 0 || e.winningRestaurantId) {
+        const ballot = e.restaurantOptions.map((o) => `${o.id}) ${o.name}`).join(" ");
+        throw new FoError(
+          "PLAN_LOCKED",
+          `Voting on "${e.title}" is already underway (${e.votes.length} vote${e.votes.length === 1 ? "" : "s"} in), so the ballot can't change: ${ballot}. Keep using it.`,
+        );
+      }
 
       const seen = new Set<string>();
       const candidates: RestaurantOption[] = args.options.map((o, i) => {

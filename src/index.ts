@@ -70,6 +70,18 @@ export function readTimeZone(env: NodeJS.ProcessEnv = process.env): string {
   return zone;
 }
 
+/**
+ * Demo only: FO_SQUAD_CLOCK_OFFSET_HOURS shifts the server's "now" (e.g. 22 to act as if
+ * tomorrow's dinner already happened, so a receipt can be added). Unset means real time.
+ */
+export function readClockOffsetMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.FO_SQUAD_CLOCK_OFFSET_HOURS?.trim();
+  if (!raw) return 0;
+  const hours = Number(raw);
+  if (!Number.isFinite(hours)) throw new StartupError(`FO_SQUAD_CLOCK_OFFSET_HOURS must be a number of hours, got "${raw}".`);
+  return Math.round(hours * 3_600_000);
+}
+
 /** Constant-time compare so the token can't be guessed one character at a time. */
 function tokenMatches(given: string | undefined, expected: string): boolean {
   if (given === undefined) return false;
@@ -153,7 +165,10 @@ export function createApp({ service, token, log }: AppOptions): Express {
 async function main(): Promise<void> {
   const store = createStore();
   const timeZone = readTimeZone(); // throws a clear message on a bad zone
-  const service = new FoSquadService(store, undefined, { timeZone });
+  const offsetMs = readClockOffsetMs(); // throws a clear message on a bad value
+  const clock = offsetMs ? () => new Date(Date.now() + offsetMs) : undefined;
+  const service = new FoSquadService(store, clock, { timeZone });
+  if (offsetMs) console.error(`[fo-squad] DEMO CLOCK: running ${offsetMs / 3_600_000}h ahead of real time (now = ${new Date(Date.now() + offsetMs).toISOString()})`);
 
   if (process.argv.includes("--stdio")) {
     // stdout carries the protocol in stdio mode, so logs go to stderr only.

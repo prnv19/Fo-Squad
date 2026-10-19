@@ -5,7 +5,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryStore } from "./events/index.js";
-import { createApp, MIN_TOKEN_LENGTH, readTimeZone, readToken } from "./index.js";
+import { createApp, MIN_TOKEN_LENGTH, readClockOffsetMs, readTimeZone, readToken } from "./index.js";
 import { createMcpServer } from "./server.js";
 import { FoSquadService } from "./service.js";
 
@@ -108,6 +108,15 @@ describe("MCP server", () => {
     const r = await client.callTool({ name: "pick_time", arguments: { force: "yes" } });
     expect(r.isError).toBe(true);
     await client.close();
+  });
+});
+
+describe("demo clock offset", () => {
+  it("is off unless FO_SQUAD_CLOCK_OFFSET_HOURS is set, and rejects non-numbers", () => {
+    expect(readClockOffsetMs({})).toBe(0);
+    expect(readClockOffsetMs({ FO_SQUAD_CLOCK_OFFSET_HOURS: "22" })).toBe(22 * 3_600_000);
+    expect(readClockOffsetMs({ FO_SQUAD_CLOCK_OFFSET_HOURS: "1.5" })).toBe(5_400_000);
+    expect(() => readClockOffsetMs({ FO_SQUAD_CLOCK_OFFSET_HOURS: "tomorrow" })).toThrow(/number of hours/);
   });
 });
 
