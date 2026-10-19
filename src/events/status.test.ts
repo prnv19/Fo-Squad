@@ -255,11 +255,37 @@ describe("getStatus: booked", () => {
     booking: { restaurantName: "Luigi's", slotId: "B", startsAt: "2026-10-24T01:30:00.000Z", partySize: 5 },
   });
 
-  it("schedules a reminder before dinner", () => {
+  it("schedules the reminder 4 hours before dinner, and the bill question 2 hours after it starts", () => {
+    // Starts 6:30pm Los Angeles time.
     const s = getStatus(booked(), EARLY);
     expect(s.stageNumber).toBe(3);
     expect(s.nextAction).toBe(
-      "Send everyone a reminder the afternoon of Sat 7:30pm (2026-10-24T01:30:00.000Z) for Luigi's.",
+      `Send each attendee the day-of reminder "Reminder: Luigi's, Sat 7:30pm!" at 2026-10-23T21:30:00.000Z (2:30pm America/Los_Angeles, before the Sat 7:30pm start). Ask the organizer about the bill at 2026-10-24T03:30:00.000Z.`,
+    );
+    expect(s.details).toMatchObject({ dayOfReminderAt: "2026-10-23T21:30:00.000Z", billQuestionAt: "2026-10-24T03:30:00.000Z" });
+  });
+
+  it("lists the other ballot choices as backups for a hard constraint raised after booking", () => {
+    const e = { ...booked(), restaurantOptions: [{ id: "1", name: "Luigi's" }, { id: "2", name: "Osteria Marco", cuisine: "Italian" }] };
+    const s = getStatus(e, EARLY);
+    expect(s.details.backupOptions).toEqual([{ name: "Osteria Marco", cuisine: "Italian", notes: undefined }]);
+    expect(s.nextAction).toMatch(/name a place from backupOptions that works for everyone\.$/);
+    expect(getStatus(booked(), EARLY).details.backupOptions).toBeUndefined();
+  });
+
+  it("never schedules a lunch reminder after the lunch, or before 9am", () => {
+    // Noon lunch in Denver (18:00Z): 4 hours before is 8am local, so it waits until 9am.
+    const noon = { ...booked(), booking: { ...booked().booking!, startsAt: "2026-10-19T18:00:00.000Z" } };
+    const s = getStatus(noon, "2026-10-18T18:00:00.000Z", "America/Denver");
+    expect(s.details.dayOfReminderAt).toBe("2026-10-19T15:00:00.000Z");
+    expect(s.nextAction).toContain("(9:00am America/Denver, before the Sat 7:30pm start)");
+    expect(s.nextAction).not.toMatch(/afternoon/);
+  });
+
+  it("asks for the reminder right away once its time has passed, until the start", () => {
+    const s = getStatus(booked(), "2026-10-23T23:00:00.000Z");
+    expect(s.nextAction).toBe(
+      `Send each attendee the day-of reminder now if it hasn't gone out: "Reminder: Luigi's, Sat 7:30pm!" Ask the organizer about the bill at 2026-10-24T03:30:00.000Z.`,
     );
   });
 
@@ -320,6 +346,11 @@ describe("getStatus: claiming", () => {
     expect(s.details.unclaimedItems).toEqual([3]);
   });
 
+  it("includes the numbered item list, so a late reply in a fresh turn can be matched to numbers", () => {
+    const s = getStatus({ ...claiming(), attendeeIds: ["pranav", "maya"] }, LATE);
+    expect(s.details.itemList).toMatch(/^1\) \S.* \$\d+\.\d{2} {2}2\) /);
+  });
+
   it("calculates once all claims are in", () => {
     const e = {
       ...claiming(),
@@ -352,36 +383,39 @@ describe("getStatus: paying", () => {
     ...base(),
     stage: "paying",
     receipts: [receipt],
-    attendeeIds: ["pranav", "maya", "jordan", "sam"],
-    payments: [
-      { personId: "pranav", amountCents: 2000, status: "pending", updatedAt: CREATED },
-      { personId: "maya", amountCents: 2688, status: "says_paid", updatedAt: CREATED },
-      { personId: "jordan", amountCents: 4736, status: "pending", updatedAt: CREATED },
-      { personId: "sam", amountCents: 1500, status: "paid", updatedAt: CREATED },
-      { personId: "priya", amountCents: 0, status: "pending", updatedAt: CREATED },
+    attendeeIds: ["pranav", "maya", "jordan"],
+    shares: [
+      { personId: "pranav", items: [], subtotalCents: 2000, extrasCents: 0, treatCents: 0, totalCents: 2000 },
+      { personId: "maya", items: [], subtotalCents: 2688, extrasCents: 0, treatCents: 0, totalCents: 2688 },
+      { personId: "jordan", items: [], subtotalCents: 4736, extrasCents: 0, treatCents: 0, totalCents: 4736 },
     ],
   });
 
-  it("lists unpaid people (not the organizer) and asks the organizer to confirm says_paid", () => {
+  it("waits for the organizer's yes, then send_totals finishes it", () => {
     const s = getStatus(paying(), LATE);
     expect(s.stageNumber).toBe(5);
-    expect(s.pending.map((p) => p.name)).toEqual(["Maya", "Jordan"]);
-    expect(s.nextAction).toMatch(/^Ask the organizer to confirm Maya's payment\. Waiting on payment from Jordan\./);
-    expect(s.details.unpaid).toEqual([{ name: "Jordan", amount: "$47.36" }]);
+    expect(s.pending).toEqual([]);
+    expect(s.nextAction).toMatch(/^Show the organizer the totals from calculate_shares and wait for their yes\. Then call send_totals/);
+    expect(s.details.totals).toEqual([
+      { name: "Pranav", total: "$20.00" },
+      { name: "Maya", total: "$26.88" },
+      { name: "Jordan", total: "$47.36" },
+    ]);
   });
 
-  it("asks the organizer to collect from opted-out people", () => {
-    const e = paying();
-    e.people = e.people.map((p) => (p.id === "jordan" ? { ...p, optedOut: true } : p));
-    const s = getStatus(e, LATE);
-    expect(s.pending.map((p) => p.name)).toEqual(["Maya"]);
-    expect(s.nextAction).toContain("Ask the organizer to collect from Jordan directly.");
+  it("asks for calculate_shares when there are no totals yet", () => {
+    expect(getStatus({ ...paying(), shares: [] }, LATE).nextAction).toMatch(/^No totals yet\. Call calculate_shares/);
   });
 });
 
 describe("getStatus: settled", () => {
   it("is done", () => {
     const s = getStatus({ ...base(), stage: "settled" }, LATE);
-    expect(s).toMatchObject({ stage: "settled", stageNumber: 6, pending: [], nextAction: "Everyone's paid. Night complete!" });
+    expect(s).toMatchObject({
+      stage: "settled",
+      stageNumber: 6,
+      pending: [],
+      nextAction: "Totals are approved and each friend's message has their Venmo link. Night complete once those are sent! Payments are between each friend and the organizer: don't track or chase them.",
+    });
   });
 });

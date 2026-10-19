@@ -42,7 +42,6 @@ describe("createEvent", () => {
       treatedIds: [],
       unclaimedPolicy: "block",
       feesSplitEvenly: false,
-      payments: [],
     });
     expect(e.people).toEqual([
       { id: "pranav", name: "Pranav", phone: "+15550001111", isOrganizer: true },

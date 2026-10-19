@@ -1,6 +1,7 @@
 import type { DinnerEvent, Person, Stage } from "../types.js";
 import { stageNumber } from "./stage.js";
 import { formatCents, joinNames, toIso, toMs } from "./util.js";
+import { billQuestionAt, dayOfReminderAt, DEFAULT_TIME_ZONE, localClockLabel } from "./zone.js";
 
 export interface PendingPerson {
   id: string;
@@ -242,7 +243,20 @@ function votingStatus(event: DinnerEvent): StageResult {
   };
 }
 
-function bookedStatus(event: DinnerEvent, nowMs: number): StageResult {
+// A friend can raise an allergy after booking; the other ballot choices give Fo a real
+// place to name to the organizer instead of only offering to call the restaurant.
+function bookedStatus(event: DinnerEvent, nowMs: number, timeZone: string): StageResult {
+  const result = bookedSchedule(event, nowMs, timeZone);
+  const backups = event.restaurantOptions.filter((o) => o.name !== event.booking?.restaurantName);
+  if (backups.length === 0) return result;
+  return {
+    ...result,
+    details: { ...result.details, backupOptions: backups.map((o) => ({ name: o.name, cuisine: o.cuisine, notes: o.notes })) },
+    nextAction: `${result.nextAction} If a friend raises an allergy or other hard constraint, tell the organizer privately and name a place from backupOptions that works for everyone.`,
+  };
+}
+
+function bookedSchedule(event: DinnerEvent, nowMs: number, timeZone: string): StageResult {
   const booking = event.booking;
   const details: Record<string, unknown> = { booking };
   if (!booking) {
@@ -254,11 +268,41 @@ function bookedStatus(event: DinnerEvent, nowMs: number): StageResult {
   }
   const when = slotLabel(event, booking.slotId) ?? booking.startsAt;
   const startsMs = Date.parse(booking.startsAt);
-  if (Number.isNaN(startsMs) || nowMs < startsMs) {
+  if (Number.isNaN(startsMs)) {
     return {
       pending: [],
       details,
-      nextAction: `Send everyone a reminder the afternoon of ${when} (${booking.startsAt}) for ${booking.restaurantName}.`,
+      nextAction: `Send everyone a reminder on the day of ${when} for ${booking.restaurantName}, before it starts.`,
+    };
+  }
+  const remind = dayOfReminderAt(new Date(startsMs), timeZone);
+  const bill = billQuestionAt(new Date(startsMs));
+  details.dayOfReminderAt = remind.toISOString();
+  details.billQuestionAt = bill.toISOString();
+  // The slot's own label, so a misconfigured zone can only move when the reminder goes out, not what it says.
+  const reminder = `"Reminder: ${booking.restaurantName}, ${when}!"`;
+  const after = event.organizerCovered
+    ? "It's the organizer's treat: no bill question, and nobody gets asked for money."
+    : `Ask the organizer about the bill at ${bill.toISOString()}.`;
+  if (nowMs < remind.getTime()) {
+    return {
+      pending: [],
+      details,
+      nextAction: `Send each attendee the day-of reminder ${reminder} at ${remind.toISOString()} (${localClockLabel(remind, timeZone)} ${timeZone}, before the ${when} start). ${after}`,
+    };
+  }
+  if (nowMs < startsMs) {
+    return {
+      pending: [],
+      details,
+      nextAction: `Send each attendee the day-of reminder now if it hasn't gone out: ${reminder} ${after}`,
+    };
+  }
+  if (event.organizerCovered) {
+    return {
+      pending: [],
+      details,
+      nextAction: "It's the organizer's treat, so there's no bill question and nobody pays. Call cover_bill (by_phone or by_email = the organizer's) to close it out.",
     };
   }
   return {
@@ -279,6 +323,14 @@ function claimingStatus(event: DinnerEvent): StageResult {
     unclaimedItems: unclaimed,
     unclaimedPolicy: event.unclaimedPolicy,
   };
+  // A friend may reply hours later in a fresh turn ("the pizza and some bread"), so the
+  // numbered list has to be here for Fo to match words to item numbers.
+  if (event.receipts.length > 0) {
+    details.itemList = event.receipts
+      .flatMap((r) => r.items)
+      .map((i) => `${i.number}) ${i.description} ${formatCents(i.amountCents)}`)
+      .join("  ");
+  }
 
   if (event.receipts.length === 0) {
     return {
@@ -327,60 +379,26 @@ function claimingStatus(event: DinnerEvent): StageResult {
 }
 
 function payingStatus(event: DinnerEvent): StageResult {
-  const owing = new Map<string, { amountCents: number; status: string }>();
-  for (const share of event.shares ?? []) {
-    owing.set(share.personId, { amountCents: share.totalCents, status: "pending" });
+  const shares = event.shares ?? [];
+  if (shares.length === 0) {
+    return { pending: [], details: {}, nextAction: "No totals yet. Call calculate_shares and show the organizer the totals before sending." };
   }
-  for (const pay of event.payments) {
-    owing.set(pay.personId, { amountCents: pay.amountCents, status: pay.status });
-  }
-  // The organizer paid the restaurant, and a $0 share (birthday treat) owes nothing.
-  const due = event.people.filter((p) => {
-    const o = owing.get(p.id);
-    return p.id !== event.organizerId && o !== undefined && o.amountCents > 0;
-  });
-  const unpaid = due.filter((p) => owing.get(p.id)?.status !== "paid");
-  const { active: pending, optedOut } = splitOptedOut(unpaid);
-  const saysPaid = pending.filter((p) => owing.get(p.id)?.status === "says_paid");
-  const notYet = pending.filter((p) => owing.get(p.id)?.status !== "says_paid");
-
   const details: Record<string, unknown> = {
-    paid: due.filter((p) => owing.get(p.id)?.status === "paid").map((p) => p.name),
-    saysPaid: saysPaid.map((p) => p.name),
-    unpaid: notYet.map((p) => ({ name: p.name, amount: formatCents(owing.get(p.id)?.amountCents ?? 0) })),
+    totals: shares.map((s) => ({ name: event.people.find((p) => p.id === s.personId)?.name ?? s.personId, total: formatCents(s.totalCents) })),
   };
-
-  if (owing.size === 0) {
-    return {
-      pending: [],
-      details,
-      nextAction: "No totals yet. Call calculate_shares and show the organizer the totals before sending.",
-    };
-  }
-
-  const parts: string[] = [];
-  if (saysPaid.length > 0) {
-    const possessive = saysPaid.map((p) => `${p.name}'s`);
-    parts.push(
-      `Ask the organizer to confirm ${joinNames(possessive)} payment${saysPaid.length > 1 ? "s" : ""}.`,
-    );
-  }
-  if (notYet.length > 0) {
-    parts.push(
-      `Waiting on payment from ${names(notYet)}. Send one spaced-out reminder at most, then hand it back to the organizer.`,
-    );
-  }
-  if (optedOut.length > 0) {
-    parts.push(`Ask the organizer to collect from ${names(optedOut)} directly.`);
-  }
-  if (parts.length === 0) {
-    parts.push("Everyone's marked paid. Ask the organizer to confirm the last payment with mark_paid.");
-  }
-  return { pending, details, nextAction: parts.join(" ") };
+  return {
+    pending: [],
+    details,
+    nextAction:
+      "Show the organizer the totals from calculate_shares and wait for their yes. Then call send_totals (by_phone or by_email = the organizer's) and send each person their own message with their Venmo link; that finishes the dinner. A friend disputing their items before then: record_claims with their full list, then calculate_shares again.",
+  };
 }
 
-/** Where the event stands and what Fo should do next. Pure: depends only on the event and `now`. */
-export function getStatus(event: DinnerEvent, now: Date | string): EventStatus {
+/**
+ * Where the event stands and what Fo should do next. Pure: depends only on the
+ * event, `now` and the time zone used to place the day-of reminder.
+ */
+export function getStatus(event: DinnerEvent, now: Date | string, timeZone: string = DEFAULT_TIME_ZONE): EventStatus {
   const nowMs = toMs(toIso(now));
   let result: StageResult;
   switch (event.stage) {
@@ -391,7 +409,7 @@ export function getStatus(event: DinnerEvent, now: Date | string): EventStatus {
       result = votingStatus(event);
       break;
     case "booked":
-      result = bookedStatus(event, nowMs);
+      result = bookedStatus(event, nowMs, timeZone);
       break;
     case "claiming":
       result = claimingStatus(event);
@@ -401,8 +419,18 @@ export function getStatus(event: DinnerEvent, now: Date | string): EventStatus {
       break;
     case "settled":
       result = event.organizerCovered
-        ? { pending: [], details: { organizerCovered: true }, nextAction: "The organizer covered the bill, so nobody owes anything. Night complete!" }
-        : { pending: [], details: {}, nextAction: "Everyone's paid. Night complete!" };
+        ? {
+            pending: [],
+            details: { organizerCovered: true },
+            nextAction:
+              "The organizer covered the bill, so nobody owes anything. Night complete! If a friend asks what they owe, say nothing is owed, without saying who paid unless the organizer asked you to thank them on their behalf.",
+          }
+        : {
+            pending: [],
+            details: event.totalsSentAt ? { totalsSentAt: event.totalsSentAt } : {},
+            nextAction:
+              "Totals are approved and each friend's message has their Venmo link. Night complete once those are sent! Payments are between each friend and the organizer: don't track or chase them.",
+          };
       break;
   }
 

@@ -348,6 +348,10 @@
     const ms = msOf(ev.at);
     const meta = side === "fo" ? `Fo · ${fmtTime(ev.at)}` : fmtTime(ev.at);
     const bubble = h("div", { class: "bubble", tabindex: "0", role: "button", "aria-label": `${side === "fo" ? "Fo" : displayName(ev.from)}: ${ev.text}` }, textWithLinks(String(ev.text ?? "")));
+    // An attached photo (a receipt). Only data: URLs, which the page's CSP allows; nothing is fetched.
+    if (typeof ev.image === "string" && ev.image.startsWith("data:image/")) {
+      bubble.prepend(h("img", { class: "bubble-img", src: ev.image, alt: "Attached photo" }));
+    }
     const node = h("div", { class: `msg ${side === "fo" ? "from-fo" : "from-them"}` }, bubble, h("div", { class: "msg-meta", text: meta }));
     const select = () => selectFrom(node, ms, "bubble");
     bubble.addEventListener("click", select);
@@ -516,39 +520,24 @@
   function onCalculateShares(res) {
     if (!res || !Array.isArray(res.shares)) return;
     const view = state.view;
-    const previous = view.split ? new Map(view.split.shares.map((s) => [personKey(s), s])) : new Map();
     view.split = { shares: res.shares, total: res.total, totalCents: res.total_cents };
-    for (const share of res.shares) {
-      const key = personKey(share);
-      if (share.is_organizer) continue;
-      const prev = previous.get(key);
-      // Same rule as the server: an unchanged amount keeps its status, a changed one starts over.
-      if (!prev || prev.total_cents !== share.total_cents || !view.payments.has(key)) view.payments.set(key, "pending");
-    }
+    // New or recalculated totals wait for the organizer's yes.
+    for (const share of res.shares) if (!share.is_organizer) view.payments.set(personKey(share), "pending");
   }
 
-  function onMarkPaid(res) {
+  // send_totals: every friend got their total and Venmo link, and the dinner is done. Payments aren't tracked.
+  function onSendTotals() {
     const view = state.view;
-    if (!res || !view.split) return;
-    const byName = new Map(view.split.shares.map((s) => [String(s.name ?? "").toLowerCase(), personKey(s)]));
-    const set = (key, status) => {
-      if (!key || !status) return;
-      if (view.payments.get(key) !== status) view.flashIds.add(key);
-      view.payments.set(key, status);
-    };
-    const person = res.person && typeof res.person === "object" ? res.person : null;
-    if (person) set(String(person.id ?? byName.get(String(person.name ?? "").toLowerCase()) ?? ""), res.status);
-    if (Array.isArray(res.still_owing)) {
-      const owing = new Map(res.still_owing.map((o) => [byName.get(String(o.name ?? "").toLowerCase()), o.status]));
-      for (const share of view.split.shares) {
-        if (share.is_organizer) continue;
-        const key = personKey(share);
-        set(key, owing.has(key) ? owing.get(key) : "paid");
-      }
+    if (!view.split) return;
+    for (const share of view.split.shares) {
+      if (share.is_organizer) continue;
+      const key = personKey(share);
+      if (view.payments.get(key) !== "sent") view.flashIds.add(key);
+      view.payments.set(key, "sent");
     }
   }
 
-  const PAY_LABEL = { pending: "Pending", says_paid: "Says paid, unconfirmed", paid: "Paid", organizer: "Paid the bill" };
+  const PAY_LABEL = { pending: "Waiting for approval", sent: "Link sent", organizer: "Paid the bill" };
 
   function money(cents, fallback) {
     if (typeof fallback === "string" && fallback) return fallback;
@@ -566,12 +555,11 @@
     ui.split.hidden = false;
     ui.splitTitle.textContent = view.restaurantName ? `The split — ${view.restaurantName}` : "The split";
     const rows = [];
-    let paid = 0, says = 0, owing = 0, sub = 0, extras = 0, total = 0;
+    let sent = 0, owing = 0, sub = 0, extras = 0, total = 0;
     for (const share of view.split.shares) {
       const key = personKey(share);
       const status = share.is_organizer ? "organizer" : view.payments.get(key) || "pending";
-      if (status === "paid") paid += 1;
-      if (status === "says_paid") says += 1;
+      if (status === "sent") sent += 1;
       if (!share.is_organizer) owing += 1;
       sub += Number(share.subtotal_cents) || 0;
       extras += (Number(share.extras_cents) || 0) + (Number(share.treat_cents) || 0);
@@ -597,9 +585,8 @@
       h("td", { class: "num", text: money(extras) }),
       h("td", { class: "num", text: money(view.split.totalCents ?? total, view.split.total) }),
       h("td")));
-    const parts = [`${paid} of ${owing} paid`];
-    if (says) parts.push(`${says} says paid`);
-    if (view.stage === "settled") parts.push("settled");
+    const parts = [sent ? `${sent} of ${owing} links sent` : "Waiting for the organizer's yes"];
+    if (view.stage === "settled") parts.push("done");
     ui.splitSummary.textContent = parts.join(" · ");
   }
 
@@ -668,7 +655,7 @@
           if (rest) rest.nameEl.textContent = view.restaurantName;
         }
         if (ok && name === "calculate_shares") onCalculateShares(res);
-        if (ok && name === "mark_paid") onMarkPaid(res);
+        if (ok && name === "send_totals") onSendTotals();
         if (ok && res && typeof res.stage === "string" && STAGES.includes(res.stage.toLowerCase()) && !view.stage) {
           view.stage = res.stage.toLowerCase();
           renderStages();

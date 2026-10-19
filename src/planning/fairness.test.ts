@@ -57,7 +57,7 @@ describe("fairness memory", () => {
     const ids = priorityIds(memory, event2People);
     expect(ids).toEqual(["maya-k"]);
     expect(fairnessNote({ people: event2People, priorityContacts: ["+15550000002"] })).toBe(
-      "Maya gave up a pick last time, so Maya gets priority tonight.",
+      "Maya gave up a pick last time, so Maya gets priority this time.",
     );
 
     const tally = tallyVotes({
@@ -98,10 +98,22 @@ describe("fairness memory", () => {
     expect(priorityContacts(memory, phones)).toEqual(["+15550000002", "+15550000003"]);
   });
 
+  it("ignores concessions made in the current event", () => {
+    // pick_time records Maya's lost cuisine in e2; tally_votes in e2 must not treat it as an old debt.
+    const memory: Concession[] = [
+      { contact: "+15550000002", eventId: "e2", what: "cuisine", at: "2026-10-18T17:45:00Z" },
+      { contact: "+15550000004", eventId: "e1", what: "restaurant", at: "2026-10-10T20:00:00Z" },
+    ];
+    expect(priorityContacts(memory, phones, "e2")).toEqual(["+15550000004"]);
+    expect(priorityIds(memory, people, "e2")).toEqual(["sam"]);
+    // The next event honors it.
+    expect(priorityIds(memory, people, "e3")).toEqual(["sam", "maya"]);
+  });
+
   it("writes notes without gendered pronouns", () => {
     expect(fairnessNote({ people, priorityContacts: [] })).toBeUndefined();
     const note = fairnessNote({ people, priorityContacts: ["+15550000002", "+15550000004"] })!;
-    expect(note).toBe("Maya and Sam gave up a pick last time, so they get priority tonight.");
+    expect(note).toBe("Maya and Sam gave up a pick last time, so they get priority this time.");
     expect(note).not.toMatch(/\b(her|his|she|he)\b/i);
   });
 });

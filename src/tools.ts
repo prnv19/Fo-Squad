@@ -209,7 +209,7 @@ export const TOOLS: readonly ToolDef[] = [
     name: "add_receipt",
     title: "Add a receipt",
     description:
-      "Call with every line item from the receipt photo, before texting any friend. Checks items sum to the subtotal and the parts sum to the total; on a mismatch nothing is saved and the error says by how much. Returns numbered items, the item_list to send friends and any warnings; call once per receipt.",
+      "Call with every line item from the receipt photo, before texting any friend. Organizer only (by_phone or by_email = whoever sent the receipt, which must be this dinner's organizer). Checks items sum to the subtotal and the parts sum to the total; on a mismatch nothing is saved and the error says by how much. Returns numbered items, the item_list to send friends and any warnings; call once per receipt.",
     inputShape: {
       event_id: eventId,
       items: z
@@ -217,13 +217,16 @@ export const TOOLS: readonly ToolDef[] = [
         .min(1),
       subtotal: money,
       tax: money,
-      tip: money,
-      fees: money.optional(),
+      tip: money.describe("Tip, or a printed service charge/gratuity (then also set tip_included)."),
+      fees: money.optional().describe("Other printed fees (delivery, kitchen, card). A service charge or gratuity goes in tip, not here."),
       discount: money.optional().describe("Positive dollars off the bill. Never put a deposit credit here."),
       total: money.describe("Printed total, after any deposit credit."),
       tip_included: z.boolean().optional().describe("Service charge or gratuity already printed on the receipt."),
       deposit_credit: money.optional().describe("Deposit credit printed on the receipt, in dollars."),
+      by_phone: byPhone("The organizer's number (who sent the receipt).").optional(),
+      by_email: byEmail("The organizer's email (who sent the receipt).").optional(),
     },
+    sender: "required",
     run: (service, args) => service.addReceipt(args),
   }),
   defineTool({
@@ -241,13 +244,18 @@ export const TOOLS: readonly ToolDef[] = [
     name: "record_claims",
     title: "Save what someone had",
     description:
-      'Call for each attendee\'s item reply, as claim "Maya: 1, 4" ("Maya: 1, 4x2" for a double portion, "Maya: none" if nothing) or person plus items. Replaces that person\'s claims; in Paying it reopens claiming for a dispute. Returns unclaimed items, shared items to flag and who hasn\'t answered.',
+      'Call for each attendee\'s item reply, as claim "Maya: 1, 4" ("Maya: 1, 4x2" for a double portion, "Maya: none" if nothing) or person plus items. Shared item ("a third of the knots", "half the pie"): list it for each person who had some, and the server splits it among them evenly; never send a fraction. Use a weight only for uneven sharing, in whole portions (2 of 3 slices = 4x2 for them, 4 for the other). Replaces that person\'s claims; in Paying it reopens claiming for a dispute. Returns unclaimed items, shared items to flag and who hasn\'t answered.',
     inputShape: {
       event_id: eventId,
       claim: z.string().optional().describe('Fixed format "Name: 1, 4".'),
       person: person("Who had the items").optional(),
       items: z
-        .array(z.object({ number: z.number().int().min(1), weight: z.number().int().min(1).optional() }))
+        .array(
+          z.object({
+            number: z.number().int().min(1),
+            weight: z.number().int().min(1).optional().describe("Whole portions when sharing unevenly. Leave out for an even share."),
+          }),
+        )
         .optional(),
     },
     run: (service, args) => service.recordClaims(args),
@@ -272,7 +280,7 @@ export const TOOLS: readonly ToolDef[] = [
     name: "cover_bill",
     title: "Organizer covers the bill",
     description:
-      "Call when the organizer, asked after the dinner whether to split the bill, says it's their treat. Organizer only (by_phone or by_email). Closes the dinner with no split and no payment requests; works before or after add_receipt, but not once totals went out.",
+      "Call when the organizer says it's their treat: asked after the dinner, or said up front (a birthday treat). Organizer only (by_phone or by_email). Before the meal it's noted and the plan carries on with no bill question; after the meal it closes the dinner with no split and no payment requests. Not once totals went out.",
     inputShape: {
       event_id: eventId,
       by_phone: byPhone("Must be the organizer's number.").optional(),
@@ -282,18 +290,17 @@ export const TOOLS: readonly ToolDef[] = [
     run: (service, args) => service.coverBill(args),
   }),
   defineTool({
-    name: "mark_paid",
-    title: "Mark a payment",
+    name: "send_totals",
+    title: "Send the totals",
     description:
-      "Call when a friend says they paid (by_phone or by_email = theirs, records says_paid) or the organizer confirms (= the organizer's, records paid). Anyone else is refused. Settles the dinner once everyone is paid.",
+      "Call when the organizer says yes to the totals from calculate_shares. Organizer only (by_phone or by_email). Returns each friend's ready-to-send message with their Venmo link. It sends nothing itself: send each message yourself, then tell the organizer. The dinner is then finished; payments aren't tracked.",
     inputShape: {
       event_id: eventId,
-      person: person("Who paid"),
-      by_phone: byPhone("The friend's own number or the organizer's.").optional(),
-      by_email: byEmail("The friend's own email or the organizer's.").optional(),
+      by_phone: byPhone("Must be the organizer's number.").optional(),
+      by_email: byEmail("Must be the organizer's email.").optional(),
     },
     sender: "required",
-    run: (service, args) => service.markPaid(args),
+    run: (service, args) => service.sendTotals(args),
   }),
   defineTool({
     name: "record_opt_out",

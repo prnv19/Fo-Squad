@@ -46,7 +46,6 @@ function dinner(overrides: Partial<DinnerEvent> = {}): DinnerEvent {
     treatedIds: [],
     unclaimedPolicy: "block",
     feesSplitEvenly: false,
-    payments: [],
     ...overrides,
   };
 }

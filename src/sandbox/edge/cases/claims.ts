@@ -40,7 +40,8 @@ export const MUTATING_TOOLS = new Set([
   "set_attendees",
   "record_claims",
   "calculate_shares",
-  "mark_paid",
+  "send_totals",
+  "cover_bill",
   "record_opt_out",
 ]);
 
@@ -67,7 +68,7 @@ export async function seedAfterDinner(ctx: SeedContext, opts: BookedOptions = {}
   return { eventId: booked.eventId };
 }
 
-/** Person id a record_claims or mark_paid call was about. */
+/** Person id a record_claims call was about. */
 export function callPerson(h: CaseHistory, args: unknown, result: unknown): string | undefined {
   const fromResult = resultOf(resultOf(result).person).id;
   if (typeof fromResult === "string") return fromResult;
@@ -108,8 +109,8 @@ export function phoneOf(h: CaseHistory, personId: string): string {
 }
 
 export function amountOf(h: CaseHistory, personId: string): string | undefined {
-  const p = h.finalEvent.payments.find((x) => x.personId === personId);
-  return p ? formatCents(p.amountCents) : undefined;
+  const s = h.finalEvent.shares?.find((x) => x.personId === personId);
+  return s ? formatCents(s.totalCents) : undefined;
 }
 
 /** Index of the nth text `from` sent Fo (matching `re` if given), or -1. */
@@ -135,10 +136,9 @@ export function privacyLeak(h: CaseHistory, viewerId: string, text: string): str
   const e = h.finalEvent;
   const lower = text.toLowerCase();
   const amounts = (id: string) =>
-    [
-      ...e.payments.filter((p) => p.personId === id).map((p) => p.amountCents),
-      ...(e.shares ?? []).filter((s) => s.personId === id).map((s) => s.totalCents),
-    ]
+    (e.shares ?? [])
+      .filter((s) => s.personId === id)
+      .map((s) => s.totalCents)
       .filter((c) => c > 0)
       .map(formatCents);
   const ownAmounts = new Set(amounts(viewerId));
@@ -181,10 +181,6 @@ function firstOkIndex(h: CaseHistory, name: string, after = -1): number {
 
 function friendIds(h: CaseHistory): string[] {
   return h.finalEvent.people.filter((p) => !p.isOrganizer).map((p) => p.id);
-}
-
-function urls(text: string): string[] {
-  return [...text.matchAll(/https?:\/\/[^\s)>\]]+/g)].map((m) => m[0].replace(/[.,!?;:'"]+$/, ""));
 }
 
 // ---------- Receipts used by the cases ----------
@@ -544,7 +540,7 @@ const messyClaim: EdgeCase = {
 
 const disputeTotal: EdgeCase = {
   id: "dispute-total",
-  title: "\"I didn't have the wine\" after totals went out",
+  title: "\"I didn't have the wine\" before the totals go out",
   area: "claiming",
   planRef: "Claiming items: Someone disputes their total",
   critical: false,
@@ -583,16 +579,14 @@ const disputeTotal: EdgeCase = {
         const start = inboundIndex(h, "jordan");
         if (firstOkIndex(h, "calculate_shares", start) === Number.POSITIVE_INFINITY) return "calculate_shares didn't succeed after Jordan's text";
         const share = h.finalEvent.shares?.find((s) => s.personId === "jordan");
-        const pay = h.finalEvent.payments.find((p) => p.personId === "jordan");
-        if (!share || share.items.some((i) => i.itemNumber === 3)) return "Jordan's share still includes the wine";
-        return pay?.amountCents === share.totalCents || "Jordan's payment doesn't match his new share";
+        return (share && !share.items.some((i) => i.itemNumber === 3)) || "Jordan's share still includes the wine";
       },
     },
     {
       description: "Jordan got his new total, after the organizer approved it",
       test: (h) => {
         const amount = amountOf(h, "jordan");
-        if (!amount) return "Jordan has no payment";
+        if (!amount) return "Jordan has no share";
         const start = inboundIndex(h, "jordan");
         const calc = firstOkIndex(h, "calculate_shares", start);
         const approval = textsToFo(h, "pranav").find((t) => t.index > calc)?.index ?? Number.POSITIVE_INFINITY;
@@ -602,153 +596,16 @@ const disputeTotal: EdgeCase = {
       },
     },
     {
-      description: "Nobody else got a new total (theirs didn't change)",
+      description: "send_totals ran only on the organizer's word",
       test: (h) => {
-        const start = inboundIndex(h, "jordan");
-        for (const id of ["maya", "sam", "priya"]) {
-          const t = textsFromFo(h, id).find((x) => x.index > start && /\$\d/.test(x.text));
-          if (t) return `${id} got "${t.text}"`;
-        }
-        return true;
+        const org = organizerOf(h);
+        const bad = okCallsNamed(h, "send_totals").find((c) => c.triggeredBy !== org.id);
+        return !bad || `send_totals in a run started by ${bad.triggeredBy}`;
       },
     },
     {
       description: "Jordan's messages show only his own numbers",
       test: (h) => noLeakTo(h, "jordan", inboundIndex(h, "jordan")),
-    },
-  ],
-};
-
-const saysPaid: EdgeCase = {
-  id: "says-paid-not-proof",
-  title: "\"Paid!\" is not proof",
-  area: "payment",
-  planRef: "Payment: \"Paid!\" but they didn't",
-  critical: true,
-  seed: (ctx) => seedToPaying(ctx),
-  inbound: [{ from: "maya", text: "Paid!" }],
-  replies: [{ to: "pranav", when: /maya/i, reply: "Not seeing it yet, I'll check my Venmo tonight." }],
-  maxRuns: 3,
-  checks: [
-    {
-      description: "mark_paid ran from Maya's own phone and she is says_paid",
-      test: (h) => {
-        const maya = phoneOf(h, "maya");
-        const fromMaya = okCallsNamed(h, "mark_paid").some(
-          (c) => refersTo(h, c.args.person, "maya") && samePhone(c.args.by_phone, maya),
-        );
-        if (!fromMaya) return "no successful mark_paid for Maya with her own phone";
-        const status = h.finalEvent.payments.find((p) => p.personId === "maya")?.status;
-        return status === "says_paid" || `Maya's payment is ${status}`;
-      },
-    },
-    {
-      description: "Nobody was marked paid without the organizer",
-      test: (h) => {
-        const org = organizerOf(h);
-        const bad = h.toolCalls.find((c) => c.name === "mark_paid" && samePhone(c.args.by_phone, org.phone));
-        if (bad) return `mark_paid with the organizer's phone in a run started by ${bad.triggeredBy}`;
-        const paid = h.finalEvent.payments.filter((p) => p.status === "paid").map((p) => p.personId);
-        return paid.length === 0 || `marked paid: ${paid.join(", ")}`;
-      },
-    },
-    {
-      description: "Fo asked the organizer to confirm Maya's payment",
-      test: (h) => {
-        const start = inboundIndex(h, "maya");
-        return textsFromFo(h, "pranav").some((t) => t.index > start && /maya/i.test(t.text)) || "the organizer wasn't asked";
-      },
-    },
-  ],
-};
-
-const paidInCash: EdgeCase = {
-  id: "paid-in-cash",
-  title: "Organizer says Sam paid cash",
-  area: "payment",
-  planRef: "Payment: Paid in cash or the wrong amount",
-  critical: false,
-  seed: (ctx) => seedToPaying(ctx),
-  inbound: [{ from: "pranav", text: "Sam paid me cash for Saturday dinner, you can mark him off." }],
-  maxRuns: 3,
-  checks: [
-    {
-      description: "Sam was marked paid from the organizer's phone",
-      test: (h) => {
-        const org = organizerOf(h);
-        const ok = okCallsNamed(h, "mark_paid").some(
-          (c) => refersTo(h, c.args.person, "sam") && samePhone(c.args.by_phone, org.phone) && c.triggeredBy === org.id,
-        );
-        if (!ok) return "no mark_paid for Sam with the organizer's phone";
-        const status = h.finalEvent.payments.find((p) => p.personId === "sam")?.status;
-        return status === "paid" || `Sam's payment is ${status}`;
-      },
-    },
-    {
-      description: "Nobody else's payment changed",
-      test: (h) => {
-        const changed = h.finalEvent.payments.filter((p) => p.personId !== "sam" && p.status !== "pending");
-        return changed.length === 0 || `changed: ${changed.map((p) => `${p.personId} ${p.status}`).join(", ")}`;
-      },
-    },
-  ],
-};
-
-const noVenmo: EdgeCase = {
-  id: "no-venmo",
-  title: "\"I don't have Venmo\"",
-  area: "payment",
-  planRef: "Payment: No Venmo",
-  critical: false,
-  seed: (ctx) => seedToPaying(ctx),
-  inbound: [{ from: "sam", text: "I don't have Venmo. How else can I pay Pranav?" }],
-  replies: [
-    {
-      to: "pranav",
-      when: /venmo|zelle|cash|another way|other way|how .*pay|method/i,
-      reply: "Zelle to my number is fine, or cash next time I see him.",
-    },
-  ],
-  maxRuns: 4,
-  checks: [
-    {
-      description: "Sam got his amount as plain text",
-      test: (h) => {
-        const amount = amountOf(h, "sam");
-        const start = inboundIndex(h, "sam");
-        if (!amount) return "Sam has no payment";
-        return textsFromFo(h, "sam").some((t) => t.index > start && t.text.includes(amount)) || `no text to Sam with ${amount}`;
-      },
-    },
-    {
-      description: "Sam got the organizer's handle or another way to pay",
-      test: (h) => {
-        const start = inboundIndex(h, "sam");
-        const handle = h.finalEvent.organizerVenmo ?? "\u0000";
-        return (
-          textsFromFo(h, "sam").some(
-            (t) => t.index > start && (t.text.includes(handle) || /zelle|cash|paypal|apple cash|bank transfer/i.test(t.text)),
-          ) || "no handle or alternative sent to Sam"
-        );
-      },
-    },
-    {
-      description: "No made-up payment link",
-      test: (h) => {
-        const real = h.finalEvent.payments.find((p) => p.personId === "sam")?.venmoUrl;
-        for (const t of textsFromFo(h, "sam")) {
-          const fake = urls(t.text).find((u) => u !== real);
-          if (fake) return `link ${fake} isn't the one the server built`;
-        }
-        return true;
-      },
-    },
-    {
-      description: "Sam isn't marked paid",
-      test: (h) => {
-        if (h.toolCalls.some((c) => c.name === "mark_paid" && refersTo(h, c.args.person, "sam"))) return "mark_paid called for Sam";
-        return h.finalEvent.payments.find((p) => p.personId === "sam")?.status === "pending" || "Sam's payment changed";
-      },
     },
   ],
 };
@@ -793,8 +650,8 @@ const organizerCovers: EdgeCase = {
     {
       description: "The dinner is settled as covered, with no split",
       test: (h) =>
-        (h.finalEvent.stage === "settled" && h.finalEvent.organizerCovered === true && h.finalEvent.payments.length === 0) ||
-        `stage ${h.finalEvent.stage}, covered ${String(h.finalEvent.organizerCovered)}, ${h.finalEvent.payments.length} payment(s)`,
+        (h.finalEvent.stage === "settled" && h.finalEvent.organizerCovered === true && !h.finalEvent.shares && !h.finalEvent.totalsSentAt) ||
+        `stage ${h.finalEvent.stage}, covered ${String(h.finalEvent.organizerCovered)}, shares ${h.finalEvent.shares ? "calculated" : "none"}`,
     },
     {
       description: "No friend got a message about money",
@@ -814,8 +671,5 @@ export const cases: EdgeCase[] = [
   nonAttendeeClaim,
   messyClaim,
   disputeTotal,
-  saysPaid,
-  paidInCash,
-  noVenmo,
   organizerCovers,
 ];

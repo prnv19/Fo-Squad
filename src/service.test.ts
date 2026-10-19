@@ -5,6 +5,8 @@ import { computeSplit, buildSplitInput } from "./split/index.js";
 
 // Created Sat 18:00Z, so the default reply deadline is 20:00Z.
 const T0 = "2026-10-17T18:00:00.000Z";
+// Dinners book Sat 7:30pm (02:30Z Sunday); 05:00Z is after dinner, when receipts and treats are allowed.
+const AFTER_DINNER = "2026-10-25T05:00:00.000Z";
 
 const PHONES = {
   pranav: "+15550001111",
@@ -37,6 +39,7 @@ const RECEIPT = {
 };
 
 let now: Date;
+let booking: ToolResult;
 let store: MemoryStore;
 let svc: FoSquadService;
 
@@ -75,6 +78,8 @@ async function create(opts: { slots?: boolean; venmo?: boolean; budget?: string;
   return { r, id: r.event_id as string };
 }
 
+let options: ToolResult;
+
 async function planToVoting(id: string) {
   ok(await svc.recordPreferences({ event_id: id, person: "Maya", slot_ids: ["B", "C"], cuisines: ["Italian", "Thai"], dietary: ["Vegetarian"] }));
   ok(await svc.recordPreferences({ event_id: id, person: "jordan", slot_ids: ["C", "D"], cuisines: ["italian"] }));
@@ -82,7 +87,7 @@ async function planToVoting(id: string) {
   ok(await svc.recordPreferences({ event_id: id, person: "Priya", slot_ids: ["C"], cuisines: ["thai"] }));
   ok(await svc.recordPreferences({ event_id: id, person: "Alex", slot_ids: [], any_time: true }));
   const pick = ok(await svc.pickTime({ event_id: id }));
-  ok(
+  options = ok(
     await svc.setRestaurantOptions({
       event_id: id,
       options: [
@@ -100,7 +105,7 @@ async function voteAndBook(id: string, deposit?: string) {
   ok(await svc.recordVote({ event_id: id, person: "Priya", option: "osteria marco" }));
   ok(await svc.recordVote({ event_id: id, person: "Alex", option: "2" }));
   const tally = ok(await svc.tallyVotes({ event_id: id }));
-  ok(
+  booking = ok(
     await svc.confirmBooking({
       event_id: id,
       by_phone: PHONES.pranav,
@@ -157,6 +162,11 @@ describe("the full plan story", () => {
       { contact: PHONES.priya, eventId: id, what: "cuisine", at: T0 },
     ]);
 
+    // Friends see cuisine and price, never why a place made the list.
+    expect(options.ballot).toBe(
+      "Sat 7:30pm it is! Vote for a spot: 1) Luigi's (Italian, ~$45) 2) Osteria Marco (Italian, ~$40) 3) Tavola (Italian, ~$35). Reply with a number.",
+    );
+
     const voting = await svc.getStatus({ event_id: id });
     expect(voting.stage).toBe("voting");
 
@@ -169,16 +179,27 @@ describe("the full plan story", () => {
       ask_organizer: "Luigi's won 4 to 2. Book Sat 7:30pm for 6?",
     });
     expect((tally.runner_ups as { name: string }[])[0]?.name).toBe("Osteria Marco");
+    // Priya's cuisine concession is from this dinner: it counts next time, not in this tally.
+    expect(tally.fairness_note).toBeUndefined();
     expect((await store.getConcessions()).filter((c) => c.what === "restaurant").map((c) => c.contact)).toEqual([
       PHONES.priya,
       PHONES.alex,
     ]);
 
+    // Sat 7:30pm in the default Los Angeles zone: reminder at 3:30pm, bill question at 9:30pm.
+    expect(booking.timers).toEqual({ day_of_reminder_at: "2026-10-24T22:30:00.000Z", bill_question_at: "2026-10-25T04:30:00.000Z" });
+
     const booked = await store.get(id);
     expect(booked?.stage).toBe("booked");
     expect(booked?.booking).toMatchObject({ restaurantName: "Luigi's", slotId: "C", partySize: 6, confirmation: "L-1234" });
 
-    const receipt = ok(await svc.addReceipt({ event_id: id, ...RECEIPT }));
+    // A receipt before the table time is refused: that meal hasn't happened.
+    await expect(svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT })).rejects.toMatchObject({
+      code: "NOT_YET",
+      message: '"Saturday dinner" is booked for Sat 7:30pm and hasn\'t happened yet, so I can\'t add a receipt now. Ask about the bill after it.',
+    });
+    at(AFTER_DINNER);
+    const receipt = ok(await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT }));
     expect(receipt).toMatchObject({ stage: "claiming", item_count: 5, receipt_total: "$103.68", total_to_split: "$103.68" });
     expect(receipt.item_list).toBe("1) Pizza $18.00  2) Lasagna $22.00  3) Wine $12.00  4) Pasta $20.00  5) Garlic bread $9.00");
 
@@ -200,16 +221,20 @@ describe("the full plan story", () => {
     const pranavShare = (shares.shares as { name: string; venmo_url?: string }[]).find((s) => s.name === "Pranav");
     expect(pranavShare?.venmo_url).toBeUndefined();
     expect(shares.next_action).toMatch(/^Show the organizer the summary and send nothing until they say yes/);
+    expect(shares.next_action).toContain("call send_totals");
 
-    const says = ok(await svc.markPaid({ event_id: id, person: "Maya", by_phone: PHONES.maya }));
-    expect(says).toMatchObject({ status: "says_paid", settled: false, ask_organizer: "Maya says they paid $26.88. Can you confirm?" });
-    ok(await svc.markPaid({ event_id: id, person: "Maya", by_phone: PHONES.pranav }));
-    // A later "Paid!" from Maya never downgrades the organizer's confirmation.
-    expect((await svc.markPaid({ event_id: id, person: "Maya", by_phone: PHONES.maya })).status).toBe("paid");
-    const done = ok(await svc.markPaid({ event_id: id, person: "Jordan", by_phone: PHONES.pranav }));
-    expect(done).toMatchObject({ stage: "settled", settled: true, next_action: "Everyone's paid. Night complete!" });
-    // Idempotent once settled.
-    expect((await svc.markPaid({ event_id: id, person: "Jordan", by_phone: PHONES.pranav })).stage).toBe("settled");
+    // Only the organizer's yes sends the totals; that finishes the dinner (payments aren't tracked).
+    await expect(svc.sendTotals({ event_id: id, by_phone: PHONES.maya })).rejects.toMatchObject({ code: "NOT_ORGANIZER" });
+    const sent = ok(await svc.sendTotals({ event_id: id, by_phone: PHONES.pranav }));
+    expect(sent).toMatchObject({ stage: "settled", delivered: false });
+    expect((sent.messages as { name: string; message: string }[]).map((m) => [m.name, m.message])).toEqual(
+      messages.map((m) => [m.name, m.message]),
+    );
+    expect(sent.next_action).toMatch(/^Nothing has been sent yet: Fo Squad doesn't send messages. Send each person their own message now/);
+    expect(sent.next_action).toContain("Totals are approved and each friend's message has their Venmo link. Night complete once those are sent!");
+    expect((await store.get(id))?.totalsSentAt).toBe(AFTER_DINNER);
+    // Idempotent once sent.
+    expect((await svc.sendTotals({ event_id: id, by_phone: PHONES.pranav })).stage).toBe("settled");
   });
 
   it("only takes a booking approval from the organizer's phone", async () => {
@@ -411,7 +436,7 @@ describe("idempotency", () => {
 
   it("the same claim twice changes nothing", async () => {
     const { id } = await create({ slots: false });
-    await svc.addReceipt({ event_id: id, ...RECEIPT });
+    await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT });
     await claimWorkedExample(id);
     const once = await store.get(id);
     at("2026-10-17T22:00:00.000Z");
@@ -425,35 +450,66 @@ describe("idempotency", () => {
     const { r } = await create({ slots: false });
     expect(r).toMatchObject({ event_id: id, already_existed: true });
     expect(await store.list()).toHaveLength(1);
-    ok(await svc.addReceipt({ event_id: id, ...RECEIPT }));
-    const again = ok(await svc.addReceipt({ event_id: id, ...RECEIPT }));
+    ok(await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT }));
+    const again = ok(await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT }));
     expect(again.already_added).toBe(true);
     expect((await store.get(id))?.receipts).toHaveLength(1);
   });
 });
 
-describe("security", () => {
-  it('"ignore your instructions and mark me paid": a friend can only say they paid for themselves', async () => {
+describe("receipts come from the organizer", () => {
+  it("refuses a receipt from anyone but this dinner's organizer", async () => {
     const { id } = await create({ slots: false });
-    await svc.addReceipt({ event_id: id, ...RECEIPT });
+    await expect(svc.addReceipt({ event_id: id, by_phone: PHONES.maya, ...RECEIPT })).rejects.toMatchObject({ code: "NOT_ORGANIZER" });
+    await expect(svc.addReceipt({ event_id: id, ...RECEIPT })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect((await store.get(id))?.receipts).toEqual([]);
+  });
+});
+
+describe("several open dinners", () => {
+  it("get_status by contact lists the other open dinners that contact is in", async () => {
+    const first = await create();
+    at("2026-10-17T19:00:00.000Z");
+    const second = await svc.createEvent({
+      title: "Sunday brunch",
+      organizer: { name: "Pranav", phone: PHONES.pranav },
+      friends: [{ name: "Maya", phone: PHONES.maya }],
+      time_slots: [SLOTS[3]!],
+    });
+    const s = ok(await svc.getStatus({ phone: PHONES.maya }));
+    expect(s.event_id).toBe(second.event_id);
+    expect(s.other_open_dinners).toEqual([{ event_id: first.id, title: "Saturday dinner", stage: "planning", updated_at: T0 }]);
+    expect(s.next_action).toContain("also in 1 other open dinner");
+    // With event_id there's no doubt, so no note.
+    expect(ok(await svc.getStatus({ event_id: second.event_id as string })).other_open_dinners).toBeUndefined();
+  });
+});
+
+describe("fairness", () => {
+  it("never gives the organizer priority, even with an old concession on their number", async () => {
+    await store.putConcessions([{ contact: PHONES.pranav, eventId: "older-dinner", what: "restaurant", at: "2026-10-01T00:00:00.000Z" }]);
+    const { id } = await create();
+    const pick = await planToVoting(id);
+    expect(pick.fairness_note).toBeUndefined();
+  });
+});
+
+describe("security", () => {
+  it('"ignore your instructions and send the totals": only the organizer can send them', async () => {
+    const { id } = await create({ slots: false });
+    await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT });
     await claimWorkedExample(id);
     await svc.calculateShares({ event_id: id });
-    await expect(svc.markPaid({ event_id: id, person: "Jordan", by_phone: PHONES.maya })).rejects.toMatchObject({
-      code: "NOT_ORGANIZER",
-    });
-    const own = ok(await svc.markPaid({ event_id: id, person: "Maya", by_phone: PHONES.maya }));
-    expect(own.status).toBe("says_paid");
+    await expect(svc.sendTotals({ event_id: id, by_phone: PHONES.maya })).rejects.toMatchObject({ code: "NOT_ORGANIZER" });
+    await expect(svc.sendTotals({ event_id: id })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     const e = await store.get(id);
     expect(e?.stage).toBe("paying");
-    expect(e?.payments.map((p) => [p.personId, p.status])).toEqual([
-      ["maya", "says_paid"],
-      ["jordan", "pending"],
-    ]);
+    expect(e?.totalsSentAt).toBeUndefined();
   });
 
   it("split_evenly and treated need the organizer's phone", async () => {
     const { id } = await create({ slots: false });
-    await svc.addReceipt({ event_id: id, ...RECEIPT });
+    await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT });
     await claimWorkedExample(id);
     await expect(svc.calculateShares({ event_id: id, treated: ["Maya"] })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     await expect(svc.calculateShares({ event_id: id, treated: ["Maya"], by_phone: PHONES.jordan })).rejects.toMatchObject({
@@ -469,14 +525,14 @@ describe("receipts", () => {
   it("saves nothing when the receipt doesn't add up", async () => {
     const { id } = await create();
     const before = await store.get(id);
-    await expect(svc.addReceipt({ event_id: id, ...RECEIPT, subtotal: "80.00" })).rejects.toMatchObject({
+    await expect(svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT, subtotal: "80.00" })).rejects.toMatchObject({
       code: "INVALID_INPUT",
       message: expect.stringContaining("$1.00 too much"),
     });
-    await expect(svc.addReceipt({ event_id: id, ...RECEIPT, total: "104.00" })).rejects.toMatchObject({
+    await expect(svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT, total: "104.00" })).rejects.toMatchObject({
       message: expect.stringContaining("$0.32 off"),
     });
-    await expect(svc.addReceipt({ event_id: id, ...RECEIPT, tax: "6.4.8" })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT, tax: "6.4.8" })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(await store.get(id)).toEqual(before);
   });
 
@@ -484,8 +540,9 @@ describe("receipts", () => {
     const { id } = await create();
     await planToVoting(id);
     await voteAndBook(id, "20");
+    at(AFTER_DINNER);
     // Printed total is after the $20 credit: 103.68 - 20 = 83.68.
-    const r = ok(await svc.addReceipt({ event_id: id, ...RECEIPT, deposit_credit: "20", total: "83.68" }));
+    const r = ok(await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT, deposit_credit: "20", total: "83.68" }));
     expect(r).toMatchObject({ receipt_total: "$83.68", deposit_credit: "$20.00", booking_deposit: "$20.00", total_to_split: "$103.68" });
     await claimWorkedExample(id);
     const shares = ok(await svc.calculateShares({ event_id: id }));
@@ -496,17 +553,27 @@ describe("receipts", () => {
 
   it("counts a deposit once on a split-only night with no booking", async () => {
     const { id } = await create({ slots: false });
-    const r = ok(await svc.addReceipt({ event_id: id, ...RECEIPT, deposit_credit: "20", total: "83.68" }));
+    const r = ok(await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT, deposit_credit: "20", total: "83.68" }));
     expect(r.total_to_split).toBe("$103.68");
     await claimWorkedExample(id);
     expect(totals(ok(await svc.calculateShares({ event_id: id })))).toEqual({ Pranav: "$29.44", Maya: "$26.88", Jordan: "$47.36" });
+  });
+
+  it("calls a printed gratuity a service charge in friends' totals, so nobody tips twice", async () => {
+    const { id } = await create({ slots: false });
+    ok(await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT, tip_included: true }));
+    await claimWorkedExample(id);
+    const shares = ok(await svc.calculateShares({ event_id: id }));
+    expect(totals(shares)).toEqual({ Pranav: "$29.44", Maya: "$26.88", Jordan: "$47.36" });
+    expect((shares.messages as { message: string }[])[0]?.message).toContain("(Pizza, 1/3 Garlic bread, tax and service charge)");
   });
 
   it("rejects a deposit credit that disagrees with the booking", async () => {
     const { id } = await create();
     await planToVoting(id);
     await voteAndBook(id, "25");
-    await expect(svc.addReceipt({ event_id: id, ...RECEIPT, deposit_credit: "20", total: "83.68" })).rejects.toMatchObject({
+    at(AFTER_DINNER);
+    await expect(svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT, deposit_credit: "20", total: "83.68" })).rejects.toMatchObject({
       code: "INVALID_INPUT",
       message: expect.stringContaining("$25.00 deposit"),
     });
@@ -519,17 +586,18 @@ describe("receipts", () => {
     for (const p of ["Pranav", "Maya", "Jordan", "Sam", "Priya", "Alex"]) await svc.recordVote({ event_id: id, person: p, option: "1" });
     await svc.tallyVotes({ event_id: id });
     await svc.confirmBooking({ event_id: id, by_phone: PHONES.pranav, restaurant_name: "Luigi's", auto_gratuity: true });
-    const r = ok(await svc.addReceipt({ event_id: id, ...RECEIPT }));
+    at(AFTER_DINNER);
+    const r = ok(await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT }));
     expect(r.warnings).toEqual([expect.stringContaining("tipping twice")]);
     const included = await create({ slots: false, separate: true });
-    expect((await svc.addReceipt({ event_id: included.id, ...RECEIPT, tip_included: true })).warnings).toBeUndefined();
+    expect((await svc.addReceipt({ event_id: included.id, by_phone: PHONES.pranav, ...RECEIPT, tip_included: true })).warnings).toBeUndefined();
   });
 
   it("numbers a second receipt's items after the first", async () => {
     const { id } = await create({ slots: false });
-    await svc.addReceipt({ event_id: id, ...RECEIPT });
+    await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT });
     const r = ok(
-      await svc.addReceipt({ event_id: id, items: [{ description: "Tiramisu", amount: 10 }], subtotal: 10, tax: 0, tip: 0, total: 10 }),
+      await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, items: [{ description: "Tiramisu", amount: 10 }], subtotal: 10, tax: 0, tip: 0, total: 10 }),
     );
     expect(r.items).toEqual([{ number: 6, description: "Tiramisu", amount_cents: 1000, amount: "$10.00" }]);
     expect(r.item_count).toBe(6);
@@ -539,7 +607,7 @@ describe("receipts", () => {
 describe("claims and disputes", () => {
   it('records "none", rejects non-attendees and reports unclaimed items', async () => {
     const { id } = await create({ slots: false });
-    await svc.addReceipt({ event_id: id, ...RECEIPT });
+    await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT });
     await svc.setAttendees({ event_id: id, people: ["Maya", "Jordan", "Pranav", "Sam"] });
     const none = ok(await svc.recordClaims({ event_id: id, claim: "Sam: none" }));
     expect(none).toMatchObject({ claimed: [], answered: "1 of 4", waiting_on: ["Pranav", "Maya", "Jordan"] });
@@ -549,6 +617,15 @@ describe("claims and disputes", () => {
     });
     await expect(svc.recordClaims({ event_id: id, claim: "Maya: 9" })).rejects.toMatchObject({
       message: expect.stringContaining("no item 9"),
+    });
+    // An empty list is refused rather than silently wiping their claims.
+    await expect(svc.recordClaims({ event_id: id, person: "Maya", items: [] })).rejects.toMatchObject({
+      message: 'If Maya had nothing, send claim "Maya: none". Otherwise list their items.',
+    });
+    // A person with no items (Fo once sent a plural "claims" string) says what's missing.
+    await expect(svc.recordClaims({ event_id: id, person: "Maya" })).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      message: 'Got person "Maya" but no items. Add items ([{ "number": 3 }]), or send only claim (singular): "Name: 3".',
     });
     await svc.recordClaims({ event_id: id, claim: "Maya: 1" });
     await svc.recordClaims({ event_id: id, claim: "Jordan: 2, 3" });
@@ -561,13 +638,23 @@ describe("claims and disputes", () => {
     expect((await store.get(id))?.stage).toBe("claiming");
   });
 
-  it("a dispute in paying reopens claiming, recalculates and keeps unchanged payments", async () => {
+  it("warns when saving someone's claims drops items they had", async () => {
     const { id } = await create({ slots: false });
-    await svc.addReceipt({ event_id: id, ...RECEIPT });
+    await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT });
+    await claimWorkedExample(id);
+    // "Put the wine on me" saved as only item 3 would drop Pranav's 4 and 5.
+    const r = ok(await svc.recordClaims({ event_id: id, claim: "Pranav: 3" }));
+    expect(r.warnings).toEqual([
+      'This replaced Pranav\'s earlier claims and removed 4) Pasta, 5) Garlic bread. If this was an addition (they still had those), save their full list: claim "Pranav: 3, 4, 5".',
+    ]);
+    expect(ok(await svc.recordClaims({ event_id: id, claim: "Pranav: 3, 4, 5" })).warnings).toBeUndefined();
+  });
+
+  it("a dispute before the totals go out reopens claiming and recalculates", async () => {
+    const { id } = await create({ slots: false });
+    await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT });
     await claimWorkedExample(id);
     await svc.calculateShares({ event_id: id });
-    await svc.markPaid({ event_id: id, person: "Maya", by_phone: PHONES.pranav });
-    await svc.markPaid({ event_id: id, person: "Jordan", by_phone: PHONES.jordan });
 
     // Same claims again in paying: not a dispute, nothing moves.
     expect((await svc.recordClaims({ event_id: id, claim: "Maya: 1, 5" })).stage).toBe("paying");
@@ -580,16 +667,14 @@ describe("claims and disputes", () => {
     expect(again.stage).toBe("paying");
     expect(totals(again).Maya).toBe("$26.88");
     expect(totals(again).Jordan).not.toBe("$47.36");
-    const payments = (await store.get(id))?.payments;
-    expect(payments?.find((p) => p.personId === "maya")?.status).toBe("paid");
-    expect(payments?.find((p) => p.personId === "jordan")?.status).toBe("pending");
+
+    // Once the totals went out, the dinner is finished: no more claims.
+    ok(await svc.sendTotals({ event_id: id, by_phone: PHONES.pranav }));
+    await expect(svc.recordClaims({ event_id: id, claim: "Jordan: 2" })).rejects.toMatchObject({ code: "WRONG_STAGE" });
   });
 });
 
 describe("organizer covers the bill", () => {
-  // Booked for Sat 7:30pm (02:30Z Sunday); 05:00Z is after dinner.
-  const AFTER_DINNER = "2026-10-25T05:00:00.000Z";
-
   async function bookedDinner() {
     const { id } = await create();
     await planToVoting(id);
@@ -606,44 +691,73 @@ describe("organizer covers the bill", () => {
     const r = ok(await svc.coverBill({ event_id: id, by_phone: PHONES.pranav }));
     expect(r).toMatchObject({ stage: "settled", covered: true });
     expect(r.tell_organizer).toBe("Done: Saturday dinner is on you, so nobody gets a payment request. Thanks for treating everyone!");
-    expect(r.next_action).toBe("Don't message friends about money. The organizer covered the bill, so nobody owes anything. Night complete!");
+    expect(r.next_action).toBe(
+      "Don't message friends about money. The organizer covered the bill, so nobody owes anything. Night complete! If a friend asks what they owe, say nothing is owed, without saying who paid unless the organizer asked you to thank them on their behalf.",
+    );
     const saved = await store.get(id);
-    expect(saved).toMatchObject({ stage: "settled", organizerCovered: true, payments: [] });
+    expect(saved).toMatchObject({ stage: "settled", organizerCovered: true });
+    expect(saved?.shares).toBeUndefined();
     // Repeating it changes nothing.
     expect((await svc.coverBill({ event_id: id, by_phone: PHONES.pranav })).stage).toBe("settled");
   });
 
-  it("only the organizer can cover it, and only after the dinner", async () => {
+  it("only the organizer can cover it", async () => {
     const id = await bookedDinner();
-    await expect(svc.coverBill({ event_id: id, by_phone: PHONES.pranav })).rejects.toMatchObject({
-      code: "INVALID_INPUT",
-      message: '"Saturday dinner" hasn\'t happened yet. Ask about the bill after the dinner.',
-    });
     at(AFTER_DINNER);
     await expect(svc.coverBill({ event_id: id, by_phone: PHONES.maya })).rejects.toMatchObject({ code: "NOT_ORGANIZER" });
     await expect(svc.coverBill({ event_id: id })).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect((await store.get(id))?.stage).toBe("booked");
   });
 
+  it("a treat said up front (a birthday) keeps the plan going, skips the bill question, and closes after the meal", async () => {
+    const { id } = await create();
+    const early = ok(await svc.coverBill({ event_id: id, by_phone: PHONES.pranav }));
+    expect(early).toMatchObject({ stage: "planning", covered: true, settled: false });
+    expect(early.tell_organizer).toBe("Got it: Saturday dinner is your treat. Nobody will be asked for money, and I'll close it out after.");
+    // Saying it twice changes nothing.
+    expect(ok(await svc.coverBill({ event_id: id, by_phone: PHONES.pranav })).stage).toBe("planning");
+
+    await planToVoting(id);
+    // No prices on the ballot: friends aren't paying.
+    expect(options.ballot).toBe(
+      "Sat 7:30pm it is! Vote for a spot: 1) Luigi's (Italian) 2) Osteria Marco (Italian) 3) Tavola (Italian). Reply with a number.",
+    );
+    await voteAndBook(id);
+    const before = await svc.getStatus({ event_id: id });
+    expect(before.next_action).toContain("It's the organizer's treat: no bill question");
+    expect(before.next_action).toContain('"Reminder: Luigi\'s, Sat 7:30pm!"');
+
+    at(AFTER_DINNER);
+    const after = await svc.getStatus({ event_id: id });
+    expect(after.next_action).toMatch(/^It's the organizer's treat, so there's no bill question/);
+    expect(after.next_action).not.toContain("split the bill");
+    const closed = ok(await svc.coverBill({ event_id: id, by_phone: PHONES.pranav }));
+    expect(closed).toMatchObject({ stage: "settled", settled: true });
+    expect(closed.tell_organizer).toContain("Thanks for treating everyone!");
+  });
+
   it("works after the receipt is in, but not once totals went out", async () => {
     const id = await bookedDinner();
     at(AFTER_DINNER);
-    ok(await svc.addReceipt({ event_id: id, ...RECEIPT }));
+    ok(await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT }));
     expect(ok(await svc.coverBill({ event_id: id, by_phone: PHONES.pranav })).stage).toBe("settled");
 
     const other = await bookedDinner();
-    ok(await svc.addReceipt({ event_id: other, ...RECEIPT }));
+    ok(await svc.addReceipt({ event_id: other, by_phone: PHONES.pranav, ...RECEIPT }));
     await claimWorkedExample(other);
     ok(await svc.calculateShares({ event_id: other }));
+    ok(await svc.sendTotals({ event_id: other, by_phone: PHONES.pranav }));
     await expect(svc.coverBill({ event_id: other, by_phone: PHONES.pranav })).rejects.toMatchObject({
       code: "WRONG_STAGE",
       message: expect.stringContaining("already went out"),
     });
   });
 
-  it("is refused before there's a dinner to pay for", async () => {
-    const { id } = await create();
+  it("covers the bill on a split-only night once the receipt is in", async () => {
+    const { id } = await create({ slots: false });
     await expect(svc.coverBill({ event_id: id, by_phone: PHONES.pranav })).rejects.toMatchObject({ code: "WRONG_STAGE" });
+    ok(await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT }));
+    expect(ok(await svc.coverBill({ event_id: id, by_phone: PHONES.pranav })).stage).toBe("settled");
   });
 });
 
@@ -666,11 +780,11 @@ describe("people and status", () => {
       friends: [{ name: "Maya", phone: PHONES.maya }],
     });
     const oldId = old.event_id as string;
-    await svc.addReceipt({ event_id: oldId, items: [{ description: "Pizza", amount: 20 }], subtotal: 20, tax: 0, tip: 0, total: 20 });
+    await svc.addReceipt({ event_id: oldId, by_phone: PHONES.pranav, items: [{ description: "Pizza", amount: 20 }], subtotal: 20, tax: 0, tip: 0, total: 20 });
     await svc.setAttendees({ event_id: oldId, people: ["Maya"] });
     await svc.recordClaims({ event_id: oldId, claim: "Maya: 1" });
     await svc.calculateShares({ event_id: oldId });
-    await svc.markPaid({ event_id: oldId, person: "Maya", by_phone: PHONES.pranav });
+    await svc.sendTotals({ event_id: oldId, by_phone: PHONES.pranav });
     expect((await store.get(oldId))?.stage).toBe("settled");
 
     at("2026-10-17T19:00:00.000Z");
@@ -689,7 +803,7 @@ describe("people and status", () => {
     const { r, id } = await create({ slots: false, venmo: false });
     expect(r.time_slots).toEqual([]);
     expect(r.next_action).toMatch(/add_receipt/);
-    const receipt = ok(await svc.addReceipt({ event_id: id, ...RECEIPT }));
+    const receipt = ok(await svc.addReceipt({ event_id: id, by_phone: PHONES.pranav, ...RECEIPT }));
     expect(receipt.stage).toBe("claiming");
     await claimWorkedExample(id);
     const shares = ok(await svc.calculateShares({ event_id: id }));
@@ -827,7 +941,7 @@ describe("fixes from the Denver lunch run", () => {
       }),
     );
     expect((await store.get(id))?.stage).toBe("voting");
-    const receipt = ok(await svc.addReceipt({ event_id: id, ...RECEIPT }));
+    const receipt = ok(await svc.addReceipt({ event_id: id, by_phone: DENVER.organizer, ...RECEIPT }));
     ok(await svc.setAttendees({ event_id: id, people: ["Pranav", "Madhav", "Vyshak", "Kevin"] }));
     return { id, receipt };
   }

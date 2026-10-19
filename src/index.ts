@@ -9,6 +9,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { createStore } from "./events/index.js";
+import { DEFAULT_TIME_ZONE, isTimeZone } from "./events/zone.js";
 import { createRunnerFromEnv, runnerEnabled, type DryRunHooks } from "./runner/factory.js";
 import type { RunnerHealth } from "./runner/runner.js";
 import { createMcpServer } from "./server.js";
@@ -64,6 +65,18 @@ export function readToken(env: NodeJS.ProcessEnv = process.env): string | undefi
   throw new StartupError(
     "FO_SQUAD_TOKEN is required: without it anyone could read and change every dinner. Generate one with: openssl rand -hex 32. For local development only, FO_SQUAD_ALLOW_NO_TOKEN=1 runs without one.",
   );
+}
+
+/**
+ * The zone the server places day-of reminders in: FO_SQUAD_TZ, else RUNNER_TZ
+ * (so a runner deployment needs only one), else the runner's default.
+ */
+export function readTimeZone(env: NodeJS.ProcessEnv = process.env): string {
+  const zone = env.FO_SQUAD_TZ?.trim() || env.RUNNER_TZ?.trim() || DEFAULT_TIME_ZONE;
+  if (!isTimeZone(zone)) {
+    throw new StartupError(`Time zone "${zone}" isn't a known IANA name (use one like America/Denver).`);
+  }
+  return zone;
 }
 
 /** Constant-time compare so the token can't be guessed one character at a time. */
@@ -160,7 +173,8 @@ export function createApp({ service, token, runnerHealth, dryRun, log }: AppOpti
 
 async function main(): Promise<void> {
   const store = createStore();
-  const service = new FoSquadService(store);
+  const timeZone = readTimeZone(); // throws a clear message on a bad zone
+  const service = new FoSquadService(store, undefined, { timeZone });
 
   if (process.argv.includes("--stdio")) {
     // stdout carries the protocol in stdio mode, so logs go to stderr only.
@@ -195,7 +209,7 @@ async function main(): Promise<void> {
     }
     const store = process.env.DATA_DIR?.trim() ? `files in ${process.env.DATA_DIR}` : "memory (lost on restart)";
     const access = token ? "token required" : "NO TOKEN: open to anyone who can reach it (FO_SQUAD_ALLOW_NO_TOKEN=1, local development only)";
-    console.error(`[fo-squad] listening on :${port}, POST /mcp (${access}), store: ${store}`);
+    console.error(`[fo-squad] listening on :${port}, POST /mcp (${access}), store: ${store}, time zone: ${timeZone}`);
   });
 }
 

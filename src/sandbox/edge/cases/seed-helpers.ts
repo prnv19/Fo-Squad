@@ -299,7 +299,7 @@ export async function seedToClaiming(
     const minutes = Math.ceil((target - ctx.now().getTime()) / 60_000);
     if (minutes > 0) ctx.advanceMinutes(minutes);
   }
-  expectOk("add_receipt", await ctx.service.addReceipt({ event_id: booked.eventId, ...(opts.receipt ?? dummyReceiptArgs()) }));
+  expectOk("add_receipt", await ctx.service.addReceipt({ event_id: booked.eventId, by_phone: booked.organizer.phone, ...(opts.receipt ?? dummyReceiptArgs()) }));
   const attendees = opts.attendees === null ? [] : (opts.attendees ?? DEFAULT_ATTENDEES);
   if (opts.attendees !== null) {
     expectOk("set_attendees", await ctx.service.setAttendees({ event_id: booked.eventId, people: attendees }));
@@ -312,11 +312,11 @@ export interface PayingOptions extends ClaimingOptions {
   claims?: Record<string, number[]>;
   unclaimedPolicy?: "block" | "split_evenly";
   treated?: string[];
-  /** Payment states to apply after totals: "says_paid" (from their phone) or "paid" (organizer). */
-  payments?: Record<string, "says_paid" | "paid">;
+  /** The organizer approved and send_totals ran: the dinner is settled. */
+  sent?: boolean;
 }
 
-/** Paying stage: claims in, calculate_shares approved by the organizer, optional payments. */
+/** Paying stage: claims in and calculate_shares run, waiting for the organizer's yes (or settled with `sent`). */
 export async function seedToPaying(
   ctx: SeedContext,
   opts: PayingOptions = {},
@@ -337,9 +337,8 @@ export async function seedToPaying(
       ...(opts.treated ? { treated: opts.treated } : {}),
     }),
   );
-  for (const [person, status] of Object.entries(opts.payments ?? {})) {
-    const by = status === "paid" ? claiming.organizer.phone : seedPerson(ctx, person).phone;
-    expectOk(`mark_paid for ${person}`, await ctx.service.markPaid({ event_id: claiming.eventId, person, by_phone: by }));
+  if (opts.sent) {
+    expectOk("send_totals", await ctx.service.sendTotals({ event_id: claiming.eventId, by_phone: claiming.organizer.phone }));
   }
   return claiming;
 }
@@ -351,7 +350,7 @@ export function makeSeedContext(start: Date = new Date("2026-10-14T16:00:00Z")):
 } {
   let t = start.getTime();
   const store = new MemoryStore();
-  const service = new FoSquadService(store, () => new Date(t));
+  const service = new FoSquadService(store, () => new Date(t), { timeZone: DEFAULT_TIME_ZONE });
   const ctx: SeedContext = {
     service,
     now: () => new Date(t),

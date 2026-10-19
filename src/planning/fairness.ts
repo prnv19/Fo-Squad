@@ -2,12 +2,20 @@ import { contactsOf, hasContact, primaryContact } from "../events/people.js";
 import type { Concession, Person } from "../types.js";
 import { joinNames } from "./text.js";
 
-/** Contacts in this group with an unredeemed concession, longest-waiting first. */
-export function priorityContacts(concessions: readonly Concession[], groupContacts: readonly string[]): string[] {
+/**
+ * Contacts in this group with an unredeemed concession, longest-waiting first.
+ * Pass the current event's id: a concession made in this event earns priority
+ * next time, never in the event where it was made.
+ */
+export function priorityContacts(
+  concessions: readonly Concession[],
+  groupContacts: readonly string[],
+  currentEventId?: string,
+): string[] {
   const group = new Set(groupContacts);
   const oldest = new Map<string, number>();
   for (const c of concessions) {
-    if (c.redeemedInEventId || !group.has(c.contact)) continue;
+    if (c.redeemedInEventId || !group.has(c.contact) || c.eventId === currentEventId) continue;
     const t = Date.parse(c.at);
     const at = Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
     const prev = oldest.get(c.contact);
@@ -19,9 +27,13 @@ export function priorityContacts(concessions: readonly Concession[], groupContac
 }
 
 /** Same ordering as priorityContacts, translated to this event's person ids. */
-export function priorityIds(concessions: readonly Concession[], people: readonly Person[]): string[] {
+export function priorityIds(
+  concessions: readonly Concession[],
+  people: readonly Person[],
+  currentEventId?: string,
+): string[] {
   const byContact = new Map(people.flatMap((p) => contactsOf(p).map((c) => [c, p.id] as const)));
-  const ids = priorityContacts(concessions, [...byContact.keys()])
+  const ids = priorityContacts(concessions, [...byContact.keys()], currentEventId)
     .map((contact) => byContact.get(contact))
     .filter((id): id is string => id !== undefined);
   return [...new Set(ids)];
@@ -64,14 +76,15 @@ export function redeem(concessions: readonly Concession[], contacts: readonly st
 }
 
 /**
- * "Maya gave up a pick last time, so Maya gets priority tonight." Worded to avoid
- * gendered pronouns. Returns undefined when nobody has priority.
+ * "Maya gave up a pick last time, so Maya gets priority this time." Worded to avoid
+ * gendered pronouns and to fit a lunch as well as a dinner. Returns undefined when
+ * nobody has priority.
  */
 export function fairnessNote(input: { people: readonly Person[]; priorityContacts: readonly string[] }): string | undefined {
   const names = input.priorityContacts
     .map((contact) => input.people.find((p) => hasContact(p, contact))?.name)
     .filter((n): n is string => Boolean(n));
   if (names.length === 0) return undefined;
-  if (names.length === 1) return `${names[0]} gave up a pick last time, so ${names[0]} gets priority tonight.`;
-  return `${joinNames(names)} gave up a pick last time, so they get priority tonight.`;
+  if (names.length === 1) return `${names[0]} gave up a pick last time, so ${names[0]} gets priority this time.`;
+  return `${joinNames(names)} gave up a pick last time, so they get priority this time.`;
 }

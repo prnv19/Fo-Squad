@@ -54,7 +54,6 @@ function event(overrides: Partial<DinnerEvent> = {}): DinnerEvent {
     treatedIds: [],
     unclaimedPolicy: "block",
     feesSplitEvenly: false,
-    payments: [],
     ...overrides,
   };
 }
@@ -214,62 +213,10 @@ describe("booked", () => {
 });
 
 describe("paying", () => {
-  // Shares calculated Sun 10am PDT.
-  const CALC = "2026-10-18T17:00:00.000Z";
-  const paying = (payments: DinnerEvent["payments"]) => event({ stage: "paying", payments });
-  const pending = (personId: string, amountCents: number, updatedAt = CALC) => ({
-    personId,
-    amountCents,
-    status: "pending" as const,
-    venmoUrl: `https://venmo.com/pranav?txn=pay&amount=${amountCents / 100}`,
-    updatedAt,
-  });
-
-  it("sends reminder 1 at 24h and 2 at 72h, only for pending payments", () => {
-    const e = paying([
-      pending("maya", 2688),
-      { ...pending("jordan", 4736), status: "says_paid" },
-      { ...pending("pranav-friend", 1000), status: "paid" },
-    ]);
-    expect(dueWork([e], state(), plus(CALC, 23.9), LA).sends).toEqual([]);
-
-    const first = dueWork([e], state(), plus(CALC, 24), LA).sends;
-    expect(first).toHaveLength(1);
-    expect(first[0]).toMatchObject({ kind: "payment_reminder", key: "dinner-1:pay-reminder:1:maya:2688" });
-    expect(first[0]!.text).toContain("$26.88");
-    expect(first[0]!.text).toContain("https://venmo.com/pranav?txn=pay&amount=26.88");
-    expect(first[0]!.text).toContain("Saturday dinner");
-
-    const s = state([first[0]!.key]);
-    expect(dueWork([e], s, plus(CALC, 71), LA).sends).toEqual([]);
-    const second = dueWork([e], s, plus(CALC, 72), LA).sends;
-    expect(second.map((x) => x.key)).toEqual(["dinner-1:pay-reminder:2:maya:2688"]);
-
-    // After reminder 2, nothing more: no send and no trigger.
-    expect(dueWork([e], state([first[0]!.key, second[0]!.key]), plus(CALC, 200), LA)).toEqual({ sends: [], triggers: [] });
-  });
-
-  it("sends only the last reminder if the runner missed the first window", () => {
-    const e = paying([pending("maya", 2688)]);
-    expect(dueWork([e], state(), plus(CALC, 80), LA).sends.map((x) => x.key)).toEqual([
-      "dinner-1:pay-reminder:2:maya:2688",
-    ]);
-  });
-
-  it("restarts reminders for a recalculated share", () => {
-    const old = state(["dinner-1:pay-reminder:1:maya:2688", "dinner-1:pay-reminder:2:maya:2688"]);
-    // A dispute changed Maya's share on day 4; calculate_shares resets it to pending with a new timestamp.
-    const recalc = plus(CALC, 96).toISOString();
-    const e = paying([pending("maya", 2400, recalc)]);
-    expect(dueWork([e], old, plus(CALC, 100), LA).sends).toEqual([]);
-    const work = dueWork([e], old, plus(recalc, 24), LA);
-    expect(work.sends.map((x) => x.key)).toEqual(["dinner-1:pay-reminder:1:maya:2400"]);
-    expect(work.sends[0]!.text).toContain("$24.00");
-  });
-
-  it("skips opted-out people", () => {
-    const e = paying([pending("sam", 2000)]);
-    expect(dueWork([e], state(), plus(CALC, 30), LA).sends).toEqual([]);
+  it("sends nothing: payments aren't tracked or chased", () => {
+    const due = dueWork([event({ stage: "paying" })], state(), at("2026-10-25T17:00:00Z"), LA);
+    expect(due.sends).toEqual([]);
+    expect(due.triggers).toEqual([]);
   });
 });
 

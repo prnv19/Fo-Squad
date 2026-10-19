@@ -420,7 +420,7 @@ export function createFoCoordinator(opts: CoordinatorOptions): FoCoordinator {
     type: "custom",
     name: "schedule_action",
     description:
-      "Wake yourself at a later time with a note saying what to do then (nudge, deadline, day-of reminder, payment reminder). Returns the scheduled time.",
+      "Wake yourself at a later time with a note saying what to do then (nudge, deadline, day-of reminder, bill question). Returns the scheduled time.",
     input_schema: {
       type: "object",
       properties: {
@@ -752,7 +752,7 @@ export async function runSandbox(opts: RunSandboxOptions): Promise<SandboxResult
   });
   const now = () => clock.nowIso();
   const store = opts.store ?? new MemoryStore();
-  const service = new FoSquadService(store, () => clock.now());
+  const service = new FoSquadService(store, () => clock.now(), { timeZone: tz });
   const responder = new PersonaResponder(scenario);
 
   const people: SandboxPerson[] = [
@@ -881,7 +881,7 @@ export async function runSandbox(opts: RunSandboxOptions): Promise<SandboxResult
   while (!stop) {
     await coordinator.idle();
     const fatal = coordinator.fatal();
-    if (settled) stop = { ok: true, why: "Settled: everyone paid." };
+    if (settled) stop = { ok: true, why: "Settled: totals sent (or the organizer's treat)." };
     else if (fatal) stop = { ok: false, why: `Stopped on an error: ${clip(fatal, 200)}` };
     else if (coordinator.turns() >= maxTurns) stop = { ok: false, why: `Stopped at the ${maxTurns}-run cap.` };
     else if (Date.now() - startedAt > budgetMs) stop = { ok: false, why: `Stopped at the ${Math.round(budgetMs / 60_000)}-minute wall-clock budget.` };

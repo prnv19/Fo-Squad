@@ -177,7 +177,6 @@ export function createEvent(input: CreateEventInput, opts: CreateEventOptions): 
     treatedIds: [],
     unclaimedPolicy: "block",
     feesSplitEvenly: false,
-    payments: [],
   };
   if (organizerVenmo !== undefined) event.organizerVenmo = organizerVenmo;
   if (budget !== undefined) event.budgetPerPersonCents = budget;

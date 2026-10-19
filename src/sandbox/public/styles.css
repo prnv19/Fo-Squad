@@ -493,6 +493,7 @@ button, select, input { font: inherit; color: inherit; }
   overflow-wrap: anywhere;
   cursor: pointer;
 }
+.bubble-img { display: block; max-width: 100%; border-radius: 12px; margin: 2px 0 8px; background: #fff; }
 .from-fo .bubble { background: var(--fo-bubble); color: var(--fo-text); border-bottom-left-radius: 6px; }
 .from-them .bubble { background: var(--me-bubble); color: var(--me-text); border-bottom-right-radius: 6px; }
 
@@ -582,10 +583,9 @@ button, select, input { font: inherit; color: inherit; }
 }
 .pay-pending { color: var(--text-2); border-color: var(--border-strong); }
 /* "Says paid" is a claim, not proof: dashed amber so it never reads as done. */
-.pay-says_paid { color: var(--warn); background: var(--warn-soft); border: 1.5px dashed var(--warn); }
-.pay-paid { color: var(--surface); background: var(--success); }
+.pay-sent { color: var(--surface); background: var(--success); }
 .pay-organizer { color: var(--accent-text); background: var(--accent-soft); }
-.pay-paid::before { content: ""; width: 9px; height: 5px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg) translate(1px, -1px); }
+.pay-sent::before { content: ""; width: 9px; height: 5px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg) translate(1px, -1px); }
 
 tr.flash td { animation: row-flash 1.2s ease-out; }
 @keyframes row-flash { from { background: var(--highlight-soft); } to { background: transparent; } }

@@ -22,7 +22,7 @@ const CONTRACT_TOOLS = [
   "record_claims",
   "calculate_shares",
   "cover_bill",
-  "mark_paid",
+  "send_totals",
   "record_opt_out",
   "get_playbook",
   "get_status",
@@ -41,11 +41,11 @@ describe("tool registry", () => {
 
   it("marks which tools carry by_phone, and whether it's required", () => {
     const withByPhone = TOOLS.filter((t) => "by_phone" in t.inputShape).map((t) => t.name);
-    expect(withByPhone.sort()).toEqual(["calculate_shares", "confirm_booking", "cover_bill", "mark_paid", "update_event"]);
+    expect(withByPhone.sort()).toEqual(["add_receipt", "calculate_shares", "confirm_booking", "cover_bill", "send_totals", "update_event"]);
     // by_email stands in for by_phone on an email, so whether one is needed is declared, not in the schema.
     for (const name of withByPhone) expect("by_email" in getTool(name)!.inputShape, name).toBe(true);
     expect(TOOLS.filter((t) => t.sender).map((t) => t.name).sort()).toEqual(withByPhone.sort());
-    expect(getTool("mark_paid")!.sender).toBe("required");
+    expect(getTool("send_totals")!.sender).toBe("required");
     expect(getTool("confirm_booking")!.sender).toBe("required");
     expect(getTool("update_event")!.sender).toBe("required");
     expect(getTool("calculate_shares")!.sender).toBe("optional");

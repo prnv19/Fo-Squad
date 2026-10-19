@@ -5,7 +5,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryStore } from "./events/index.js";
-import { createApp, MIN_TOKEN_LENGTH, readToken } from "./index.js";
+import { createApp, MIN_TOKEN_LENGTH, readTimeZone, readToken } from "./index.js";
 import { createMcpServer } from "./server.js";
 import { FoSquadService } from "./service.js";
 
@@ -24,7 +24,7 @@ const CONTRACT_TOOLS = [
   "record_claims",
   "calculate_shares",
   "cover_bill",
-  "mark_paid",
+  "send_totals",
   "record_opt_out",
   "get_playbook",
   "get_status",
@@ -108,6 +108,18 @@ describe("MCP server", () => {
     const r = await client.callTool({ name: "pick_time", arguments: { force: "yes" } });
     expect(r.isError).toBe(true);
     await client.close();
+  });
+});
+
+describe("startup time zone", () => {
+  it("prefers FO_SQUAD_TZ, then RUNNER_TZ, then the default", () => {
+    expect(readTimeZone({ FO_SQUAD_TZ: "America/Denver", RUNNER_TZ: "America/New_York" })).toBe("America/Denver");
+    expect(readTimeZone({ RUNNER_TZ: "America/New_York" })).toBe("America/New_York");
+    expect(readTimeZone({})).toBe("America/Los_Angeles");
+  });
+
+  it("refuses an unknown zone", () => {
+    expect(() => readTimeZone({ FO_SQUAD_TZ: "Denver" })).toThrow(/isn't a known IANA name/);
   });
 });
 

@@ -7,7 +7,8 @@ export type FoErrorCode =
   | "INVALID_INPUT"
   | "OPTED_OUT"
   | "CLAIMS_PENDING"
-  | "OPEN_DINNER";
+  | "OPEN_DINNER"
+  | "NOT_YET";
 
 /**
  * An error whose message is safe and useful for Fo to relay to the organizer.

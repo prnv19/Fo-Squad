@@ -39,8 +39,6 @@ All Fo calls are strictly sequential (Fo turns are slow and serial). If a Fo tur
 | Voting deadline | Two hours into the vote, or everyone voted, and no winner | Trigger `deadline` (Claude calls `tally_votes`) | `<event>:deadline:voting:<deadline>` |
 | Day-of reminder | max(start − 4 h, 9 am local) and before the start | Everyone going: not opted out, not known to be unable to make the slot | `<event>:day-of:<startsAt>` |
 | After dinner | Start + 2 h | Trigger `after_dinner` (Claude asks the organizer for the receipt) | `<event>:after-dinner:<startsAt>` |
-| Payment reminder 1 | 24 h after the share was calculated | Payments still `pending` (not `says_paid` or `paid`), with amount and Venmo link | `<event>:pay-reminder:1:<person>:<cents>` |
-| Payment reminder 2 | 72 h after | Same | `<event>:pay-reminder:2:<person>:<cents>` |
 
 - The vote has no deadline field on the event, so the runner notes when it first sees each ballot (a marker key in `state.done`) and gives the vote the same two-hour window as replies. A new ballot starts a new round.
 - Reminder 1 only goes out between 24 h and 72 h. If the runner was down for that whole window, only reminder 2 goes out. After reminder 2 there are no more texts and no trigger: collecting the rest is up to the organizer.

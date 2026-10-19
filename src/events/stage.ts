@@ -3,7 +3,7 @@ import { FoError } from "./errors.js";
 import { toIso } from "./util.js";
 
 /**
- * Forward moves plus one loop back: paying -> claiming for disputes.
+ * Forward moves plus one loop back: paying -> claiming for a dispute before the totals go out.
  * Planning, voting and booked can all jump to claiming because a receipt can
  * arrive on a split-only night that never went through planning. Booked and
  * claiming can jump to settled when the organizer covers the whole bill.
@@ -22,7 +22,7 @@ const DESCRIPTIONS: Record<Stage, string> = {
   voting: "in the restaurant vote",
   booked: "already booked",
   claiming: "collecting who had what from the receipt",
-  paying: "waiting on payments",
+  paying: "waiting for the organizer to approve the totals",
   settled: "already settled",
 };
 

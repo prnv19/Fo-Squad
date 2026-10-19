@@ -171,24 +171,21 @@ describe("create_event binding", () => {
 });
 
 describe("by_phone injection", () => {
-  it("Maya's text can't mark Jordan paid, even if the model passes the organizer's phone", async () => {
+  it("Maya's text can't send the totals, even if the model passes the organizer's phone", async () => {
     const id = await createEvent();
     await toPaying(id);
-    const maya = textFrom(PHONES.maya, id);
-    const r = await call(maya, "mark_paid", { event_id: id, person: "Jordan", by_phone: PHONES.pranav });
+    const r = await call(textFrom(PHONES.maya, id), "send_totals", { event_id: id, by_phone: PHONES.pranav });
     expect(r.ok).toBe(false);
     expect(errorOf(r)?.code).toBe("NOT_ORGANIZER");
-
-    const own = await call(maya, "mark_paid", { event_id: id, person: "Maya" });
-    expect(own.result.status).toBe("says_paid");
+    expect((await store.get(id))!.stage).toBe("paying");
   });
 
-  it("the organizer's text marks Jordan paid", async () => {
+  it("the organizer's text sends the totals and finishes the dinner", async () => {
     const id = await createEvent();
     await toPaying(id);
-    const r = await call(textFrom(PHONES.pranav, id), "mark_paid", { event_id: id, person: "Jordan" });
+    const r = await call(textFrom(PHONES.pranav, id), "send_totals", { event_id: id });
     expect(r.ok).toBe(true);
-    expect(r.result.status).toBe("paid");
+    expect(r.result.stage).toBe("settled");
   });
 
   it("a timer run can't confirm a booking: it needs the organizer's approval by text", async () => {

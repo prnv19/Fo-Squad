@@ -78,7 +78,7 @@ const SERVICE_RECEIPT = {
 };
 
 describe("claims edge cases: shape", () => {
-  it("has the eleven cases with unique kebab-case ids, run caps and cast-only senders", () => {
+  it("has the eight cases with unique kebab-case ids, run caps and cast-only senders", () => {
     expect(cases.map((c) => c.id)).toEqual([
       "receipt-mismatch",
       "tip-already-included",
@@ -87,9 +87,6 @@ describe("claims edge cases: shape", () => {
       "claim-from-non-attendee",
       "messy-claim",
       "dispute-total",
-      "says-paid-not-proof",
-      "paid-in-cash",
-      "no-venmo",
       "organizer-covers",
     ]);
     expect(new Set(cases.map((c) => c.id)).size).toBe(cases.length);
@@ -107,7 +104,6 @@ describe("claims edge cases: shape", () => {
       "unclaimed-item",
       "double-claim-single-item",
       "messy-claim",
-      "says-paid-not-proof",
       "organizer-covers",
     ]);
   });
@@ -122,8 +118,8 @@ describe("claims edge cases: seeds", () => {
     expect(e.receipts).toEqual([]);
     expect(s.ctx.now().getTime()).toBeGreaterThan(Date.parse(e.booking!.startsAt));
     expect(c.stubs?.receiptText).toContain("Subtotal  $112.00");
-    expect((await s.call("add_receipt", CUT_RECEIPT)).ok).toBe(false);
-    expect((await s.call("add_receipt", FULL_RECEIPT)).ok).toBe(true);
+    expect((await s.call("add_receipt", { by_phone: ORG, ...CUT_RECEIPT })).ok).toBe(false);
+    expect((await s.call("add_receipt", { by_phone: ORG, ...FULL_RECEIPT })).ok).toBe(true);
   });
 
   it("tip-already-included: booked with Pranav, Maya and Jordan; the printed receipt validates with tip_included", async () => {
@@ -131,7 +127,7 @@ describe("claims edge cases: seeds", () => {
     const e = await s.event();
     expect(e.stage).toBe("booked");
     expect(e.people.map((p) => p.id)).toEqual(["pranav", "maya", "jordan"]);
-    expect((await s.call("add_receipt", SERVICE_RECEIPT)).ok).toBe(true);
+    expect((await s.call("add_receipt", { by_phone: ORG, ...SERVICE_RECEIPT })).ok).toBe(true);
   });
 
   it("unclaimed-item: claiming, everyone but Sam answered, so Sam's 6 leaves item 8 unclaimed", async () => {
@@ -166,33 +162,25 @@ describe("claims edge cases: seeds", () => {
     expect(e.claimAnsweredIds.sort()).toEqual(["jordan", "maya", "pranav", "sam"]);
   });
 
-  it("dispute-total: paying; moving the wine to Pranav changes only Jordan's payment", async () => {
+  it("dispute-total: paying; moving the wine to Pranav changes only Jordan's share", async () => {
     const s = await sim(byId("dispute-total"));
     const before = await s.event();
     expect(before.stage).toBe("paying");
-    expect(before.payments.every((p) => p.status === "pending")).toBe(true);
+    expect(before.organizerVenmo).toBe("pranav-sandbox");
+    expect(before.totalsSentAt).toBeUndefined();
     await s.call("record_claims", { claim: "Jordan: 2, 4" }, "jordan");
     expect((await s.call("calculate_shares", {}, "jordan")).ok).toBe(false);
     await s.call("record_claims", { claim: "Pranav: 3, 7, 9" });
     expect((await s.call("calculate_shares", {})).ok).toBe(true);
     const after = await s.event();
     for (const id of ["maya", "sam", "priya"]) {
-      const amount = (e: typeof before) => e.payments.find((p) => p.personId === id)!.amountCents;
+      const amount = (e: typeof before) => e.shares!.find((p) => p.personId === id)!.totalCents;
       expect(amount(after)).toBe(amount(before));
     }
-    const jordan = (e: typeof before) => e.payments.find((p) => p.personId === "jordan")!.amountCents;
+    const jordan = (e: typeof before) => e.shares!.find((p) => p.personId === "jordan")!.totalCents;
     expect(jordan(after)).toBeLessThan(jordan(before));
   });
 
-  it("payment cases: paying, everyone pending, Venmo links built", async () => {
-    for (const id of ["says-paid-not-proof", "paid-in-cash", "no-venmo"]) {
-      const e = await (await sim(byId(id))).event();
-      expect(e.stage).toBe("paying");
-      expect(e.organizerVenmo).toBe("pranav-sandbox");
-      expect(e.payments.map((p) => p.personId).sort()).toEqual(["jordan", "maya", "priya", "sam"]);
-      expect(e.payments.every((p) => p.status === "pending" && p.venmoUrl)).toBe(true);
-    }
-  });
 });
 
 describe("claims edge cases: checks", () => {
@@ -203,11 +191,11 @@ describe("claims edge cases: checks", () => {
       const s = await sim(c);
       s.b.inbound("pranav", "[receipt photo] Dinner's done, I paid. Can you split it?");
       if (o.earlyFriend) s.b.text("maya", "Pranav covered Saturday dinner. Reply with the numbers of what you had.");
-      if (o.fudge) await s.call("add_receipt", { ...CUT_RECEIPT, subtotal: "105.00", total: "134.87" });
-      else await s.call("add_receipt", CUT_RECEIPT);
+      if (o.fudge) await s.call("add_receipt", { by_phone: ORG, ...CUT_RECEIPT, subtotal: "105.00", total: "134.87" });
+      else await s.call("add_receipt", { by_phone: ORG, ...CUT_RECEIPT });
       if (!o.skipTell) s.b.text("pranav", "The items add up to $105.00 but the subtotal says $112.00. Is a line missing?");
       s.b.inbound("pranav", FIX);
-      if (!o.skipSave && !o.fudge) await s.call("add_receipt", FULL_RECEIPT);
+      if (!o.skipSave && !o.fudge) await s.call("add_receipt", { by_phone: ORG, ...FULL_RECEIPT });
       s.b.text("pranav", "Got it: 9 items, $141.87 total. Did all 6 make it?");
       return s.history();
     };
@@ -224,7 +212,7 @@ describe("claims edge cases: checks", () => {
     const run = async (o: { receipt?: Record<string, unknown>; skipCalc?: boolean } = {}) => {
       const s = await sim(c);
       s.b.inbound("pranav", "[receipt photo] Dinner's done, I paid. Maya, Jordan and I all made it. Split it?");
-      await s.call("add_receipt", o.receipt ?? SERVICE_RECEIPT);
+      await s.call("add_receipt", { by_phone: ORG, ...(o.receipt ?? SERVICE_RECEIPT) });
       await s.call("set_attendees", { people: ["pranav", "maya", "jordan"] });
       await s.call("record_claims", { claim: "Maya: 1, 4" }, "maya");
       await s.call("record_claims", { claim: "Jordan: 2, 4" }, "jordan");
@@ -309,22 +297,6 @@ describe("claims edge cases: checks", () => {
     });
   });
 
-  it("says-paid-not-proof", async () => {
-    const c = byId("says-paid-not-proof");
-    const run = async (o: { skipMark?: boolean; asOrganizer?: boolean; noAsk?: boolean } = {}) => {
-      const s = await sim(c);
-      s.b.inbound("maya", "Paid!");
-      if (!o.skipMark) await s.call("mark_paid", { person: "maya", by_phone: o.asOrganizer ? ORG : "303-555-0101" }, "maya");
-      if (!o.noAsk) s.b.text("pranav", "Maya says she paid for Saturday dinner. Can you confirm?");
-      return s.history();
-    };
-    await expectChecks(c, () => run(), {
-      0: () => run({ skipMark: true }),
-      1: () => run({ asOrganizer: true }),
-      2: () => run({ noAsk: true }),
-    });
-  });
-
   it("non-critical cases pass on a good run and fail on an obvious bad one", async () => {
     const nonAttendee = byId("claim-from-non-attendee");
     {
@@ -350,37 +322,22 @@ describe("claims edge cases: checks", () => {
       await s.call("calculate_shares", {});
       s.b.text("pranav", "New totals... Send?");
       s.b.inbound("pranav", "Yes, send Jordan the update.");
+      await s.call("send_totals", { by_phone: ORG });
       const h0 = await s.history();
-      const amount = formatCents(h0.finalEvent.payments.find((p) => p.personId === "jordan")!.amountCents);
-      s.b.text("jordan", `Updated share for Saturday dinner: ${amount}.`);
+      const amount = formatCents(h0.finalEvent.shares!.find((p) => p.personId === "jordan")!.totalCents);
+      s.b.text("jordan", `Your share for Saturday dinner: ${amount}.`);
       expect(failing(dispute, await s.history())).toEqual([]);
-      s.b.text("maya", "Updated share for Saturday dinner: $25.00.");
-      expect(failing(dispute, await s.history())).toEqual(["Nobody else got a new total (theirs didn't change)"]);
     }
-
-    const cash = byId("paid-in-cash");
     {
-      const s = await sim(cash);
-      s.b.inbound("pranav", "Sam paid me cash for Saturday dinner, you can mark him off.");
-      await s.call("mark_paid", { person: "Sam", by_phone: ORG });
-      expect(failing(cash, await s.history())).toEqual([]);
-      const t = await sim(cash);
-      await t.call("mark_paid", { person: "sam", by_phone: phone("sam") }, "sam");
-      expect(failing(cash, await t.history())).toEqual(["Sam was marked paid from the organizer's phone"]);
-    }
-
-    const venmo = byId("no-venmo");
-    {
-      const s = await sim(venmo);
-      s.b.inbound("sam", "I don't have Venmo. How else can I pay Pranav?");
-      const e = await s.event();
-      const amount = formatCents(e.payments.find((p) => p.personId === "sam")!.amountCents);
-      s.b.text("pranav", "Sam doesn't have Venmo. What other way works?");
-      s.b.inbound("pranav", "Zelle to my number is fine, or cash next time I see him.");
-      s.b.text("sam", `No problem! Your share for Saturday dinner is ${amount}. Pranav takes Zelle at 303-555-0100 or cash.`);
-      expect(failing(venmo, await s.history())).toEqual([]);
-      s.b.text("sam", "Or pay here: https://pay.example.com/pranav");
-      expect(failing(venmo, await s.history())).toEqual(["No made-up payment link"]);
+      const s = await sim(dispute);
+      s.b.inbound("jordan", "Wait, I didn't have the wine. Just the lasagna and the garlic bread.");
+      await s.call("record_claims", { claim: "Jordan: 2, 4" }, "jordan");
+      await s.call("record_claims", { claim: "Pranav: 3, 7, 9" }, "jordan");
+      await s.call("calculate_shares", {}, "jordan");
+      await s.call("send_totals", { by_phone: ORG }, "jordan");
+      expect(failing(dispute, await s.history())).toEqual(
+        expect.arrayContaining(["The wine moved to someone else only on the organizer's word", "send_totals ran only on the organizer's word"]),
+      );
     }
   });
 });
@@ -388,11 +345,11 @@ describe("claims edge cases: checks", () => {
 describe("privacyLeak", () => {
   it("flags other people's totals, named exclusive items, budgets and dietary needs, not the viewer's own", async () => {
     const { ctx, store } = makeSeedContext();
-    const c = byId("says-paid-not-proof");
+    const c = byId("dispute-total");
     const { eventId } = await c.seed(ctx);
     const e = (await store.get(eventId))!;
     const h = new HistoryBuilder().build(e);
-    const amount = (id: string) => formatCents(e.payments.find((p) => p.personId === id)!.amountCents);
+    const amount = (id: string) => formatCents(e.shares!.find((p) => p.personId === id)!.totalCents);
     expect(privacyLeak(h, "priya", `Your share is ${amount("priya")}.`)).toBeUndefined();
     expect(privacyLeak(h, "priya", `Maya owes ${amount("maya")}.`)).toMatch(/Maya's total/);
     expect(privacyLeak(h, "priya", "Maya had the Mushroom risotto.")).toMatch(/Maya had/);

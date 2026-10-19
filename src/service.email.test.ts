@@ -18,12 +18,14 @@ const SLOTS = [
   { label: "Thu 12pm", starts_at: "2026-10-22T19:00:00.000Z" },
 ];
 
+let now: Date;
 let store: MemoryStore;
 let svc: FoSquadService;
 
 beforeEach(() => {
+  now = new Date(T0);
   store = new MemoryStore();
-  svc = new FoSquadService(store, () => new Date(T0));
+  svc = new FoSquadService(store, () => now);
 });
 
 function ok(r: ToolResult): ToolResult {
@@ -89,10 +91,13 @@ describe("a work lunch over email", () => {
       code: "NOT_ORGANIZER",
     });
     ok(await svc.confirmBooking({ event_id: id, by_email: "DANA@acme.com", restaurant_name: "Noodle Bar" }));
+    // After lunch: a receipt before the table time is refused.
+    now = new Date("2026-10-23T00:00:00.000Z");
 
     ok(
       await svc.addReceipt({
         event_id: id,
+        by_email: EMAILS.dana,
         items: [
           { description: "Ramen", amount: "16" },
           { description: "Udon", amount: "14" },
@@ -117,12 +122,10 @@ describe("a work lunch over email", () => {
     ]);
     expect(messages[0]?.phone).toBeUndefined();
 
-    // A friend's own email only ever says they paid; the organizer's email confirms.
-    expect(ok(await svc.markPaid({ event_id: id, person: "Lee", by_email: EMAILS.lee })).status).toBe("says_paid");
-    await expect(svc.markPaid({ event_id: id, person: "Lee", by_email: EMAILS.ravi })).rejects.toMatchObject({ code: "NOT_ORGANIZER" });
-    ok(await svc.markPaid({ event_id: id, person: "Lee", by_email: EMAILS.dana }));
-    const done = ok(await svc.markPaid({ event_id: id, person: "Ravi", by_email: EMAILS.dana }));
-    expect(done).toMatchObject({ stage: "settled", settled: true });
+    // Only the organizer's email sends the totals, which finishes the lunch.
+    await expect(svc.sendTotals({ event_id: id, by_email: EMAILS.lee })).rejects.toMatchObject({ code: "NOT_ORGANIZER" });
+    const done = ok(await svc.sendTotals({ event_id: id, by_email: "DANA@acme.com" }));
+    expect(done).toMatchObject({ stage: "settled", delivered: false });
   });
 
   it("mixes texted and emailed people in one dinner", async () => {

@@ -212,19 +212,6 @@ export type SplitResult =
   | { ok: true; shares: PersonShare[]; totalCents: Cents }
   | { ok: false; error: SplitError };
 
-// ---------- Payment ----------
-
-/** "says_paid": friend texted "Paid!" but the organizer hasn't confirmed. A text is never proof. */
-export type PaymentStatus = "pending" | "says_paid" | "paid";
-
-export interface Payment {
-  personId: string;
-  amountCents: Cents;
-  status: PaymentStatus;
-  venmoUrl?: string;
-  updatedAt: string;
-}
-
 // ---------- The event ----------
 
 /**
@@ -290,9 +277,13 @@ export interface DinnerEvent {
   /** Split delivery-style fees evenly instead of proportionally. */
   feesSplitEvenly: boolean;
 
-  // Paying
+  // Paying: totals worked out and waiting for the organizer's yes
   shares?: PersonShare[];
-  payments: Payment[];
-  /** The organizer covered the whole bill (their treat): settled with no split and no payment requests. */
+  /** When send_totals ran: each friend got their total and Venmo link, and the dinner is finished. Payments aren't tracked. */
+  totalsSentAt?: string;
+  /**
+   * The organizer covers the whole bill (their treat): no split and no payment requests.
+   * Can be set before the meal (a birthday treat); the dinner then settles after it.
+   */
   organizerCovered?: boolean;
 }

@@ -15,8 +15,8 @@ export type SandboxEvent =
     }
   /** Simulated clock moved forward. `at` is simulated time throughout. */
   | { type: "clock"; at: string }
-  /** A text on someone's phone. Fo is always one side. */
-  | { type: "text"; at: string; from: PhoneId; to: PhoneId; text: string }
+  /** A text on someone's phone. Fo is always one side. `image` is an attached photo as a data: URL (a receipt). */
+  | { type: "text"; at: string; from: PhoneId; to: PhoneId; text: string; image?: string }
   /** A Fo Squad MCP tool call made by the coordinator. */
   | { type: "tool"; at: string; name: string; args: unknown; result: unknown; ok: boolean }
   /** Real-world actions that the sandbox does NOT perform (calls, bookings, payments). */

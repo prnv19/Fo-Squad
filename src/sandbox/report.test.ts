@@ -89,17 +89,15 @@ describe("writeReport", () => {
 });
 
 describe("demo fixture", () => {
-  it("covers every event type, all six stages, says_paid then paid, and a cost", () => {
+  it("covers every event type, all six stages, sending the totals, and a cost", () => {
     const types = new Set(demoHistory.map((e) => e.type));
     expect([...types].sort()).toEqual(Object.keys(ONE_OF_EACH).sort());
     const stages = demoHistory.flatMap((e) => (e.type === "stage" ? [e.stage] : []));
     expect(stages).toEqual(["planning", "voting", "booked", "claiming", "paying", "settled"]);
 
-    const statuses = demoHistory.flatMap((e) =>
-      e.type === "tool" && e.name === "mark_paid" ? [(e.result as { status: string }).status] : [],
-    );
-    expect(statuses.indexOf("says_paid")).toBeGreaterThanOrEqual(0);
-    expect(statuses.lastIndexOf("paid")).toBeGreaterThan(statuses.indexOf("says_paid"));
+    expect(demoHistory.some((e) => e.type === "tool" && e.name === "send_totals" && e.ok)).toBe(true);
+    // The organizer sends the receipt as a photo.
+    expect(demoHistory.some((e) => e.type === "text" && e.from === "pranav" && e.image?.startsWith("data:image/png;base64,"))).toBe(true);
 
     expect(demoHistory.some((e) => e.type === "stubbed")).toBe(true);
     expect(demoHistory.some((e) => e.type === "text" && e.text.includes("ignore all previous instructions"))).toBe(true);

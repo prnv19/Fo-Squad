@@ -10,6 +10,7 @@ import {
   channelOf,
   contactLabel,
   contactsOf,
+  tryNormalizeContact,
   createEvent,
   DEFAULT_REPLY_WINDOW_MS,
   FoError,
@@ -29,6 +30,7 @@ import {
   type EventStore,
 } from "./events/index.js";
 import { contactFor } from "./events/factory.js";
+import { billQuestionAt, dayOfReminderAt, DEFAULT_TIME_ZONE } from "./events/zone.js";
 import {
   fairnessNote,
   filterRestaurantOptions,
@@ -50,6 +52,7 @@ import {
   buildShareMessage,
   buildSplitInput,
   buildVenmoLink,
+  type VenmoLink,
   computeSplit,
   formatCents,
   nextItemNumber,
@@ -63,7 +66,6 @@ import type {
   Concession,
   DinnerEvent,
   LineItem,
-  Payment,
   Person,
   PersonShare,
   Preferences,
@@ -174,7 +176,7 @@ export interface ConfirmBookingArgs extends SenderArgs {
   notes?: string;
 }
 
-export interface AddReceiptArgs {
+export interface AddReceiptArgs extends SenderArgs {
   event_id: string;
   items: { description: string; amount: Money }[];
   subtotal: Money;
@@ -210,9 +212,8 @@ export interface CoverBillArgs extends SenderArgs {
   event_id: string;
 }
 
-export interface MarkPaidArgs extends SenderArgs {
+export interface SendTotalsArgs extends SenderArgs {
   event_id: string;
-  person: string;
 }
 
 export interface GetStatusArgs {
@@ -226,6 +227,37 @@ export interface GetStatusArgs {
 const MAX_SLOTS = 26;
 /** How long the people asked to shift get to answer before pick_time decides anyway. */
 const SHIFT_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * "(Italian, ~$45)": enough for friends to choose between options. Never the
+ * notes, which may say why a place was picked (someone's diet or budget), and
+ * no price on the organizer's treat, where it would read as what they'll pay.
+ */
+function ballotTag(o: RestaurantOption, treat: boolean): string {
+  const parts = [
+    ...(o.cuisine ? [o.cuisine] : []),
+    ...(o.pricePerPersonCents !== undefined && !treat ? [`~${formatCents(o.pricePerPersonCents).replace(/\.00$/, "")}`] : []),
+  ];
+  return parts.length ? ` (${parts.join(", ")})` : "";
+}
+
+/** Whether the meal is over (or under way): a booked table's start has passed, or it was a split-only night. */
+function mealHappened(e: DinnerEvent, nowIso: string): boolean {
+  if (e.booking) return Date.parse(nowIso) >= Date.parse(e.booking.startsAt);
+  if (e.timeSlots.length === 0) return true;
+  return e.stage !== "planning" && e.stage !== "voting";
+}
+
+/** The booked meal hasn't started yet, so there's no bill to split or cover. */
+function assertMealHappened(e: DinnerEvent, nowIso: string, doing: string): void {
+  if (e.booking && Date.parse(nowIso) < Date.parse(e.booking.startsAt)) {
+    const when = slotLabel(e, e.booking.slotId) ?? e.booking.startsAt;
+    throw new FoError(
+      "NOT_YET",
+      `"${e.title}" is booked for ${when} and hasn't happened yet, so I can't ${doing} now. Ask about the bill after it.`,
+    );
+  }
+}
 
 function invalid(message: string): FoError {
   return new FoError("INVALID_INPUT", message);
@@ -469,10 +501,57 @@ function extrasLabel(event: DinnerEvent): string {
   const labels: string[] = [];
   const sum = (pick: (r: Receipt) => number) => event.receipts.reduce((acc, r) => acc + pick(r), 0);
   if (sum((r) => r.taxCents)) labels.push("tax");
-  if (sum((r) => r.tipCents)) labels.push("tip");
+  // A gratuity printed on the receipt reads as a service charge, so nobody thinks to tip again.
+  if (event.receipts.some((r) => r.tipCents && r.tipIncluded)) labels.push("service charge");
+  if (event.receipts.some((r) => r.tipCents && !r.tipIncluded)) labels.push("tip");
   if (sum((r) => r.feesCents)) labels.push("fees");
   if (sum((r) => r.discountCents) || event.booking?.depositCents) labels.push("deposit and discounts");
   return labels.length ? joinNames(labels) : "tax and tip";
+}
+
+interface ShareRow {
+  share: PersonShare;
+  person: Person;
+  isOrganizer: boolean;
+  link?: VenmoLink;
+  message?: string;
+}
+
+/** Each person's share with their Venmo link and ready-to-send message (none for the organizer). */
+function shareRows(e: DinnerEvent, shares: readonly PersonShare[]): ShareRow[] {
+  const organizer = getOrganizer(e)!;
+  const label = extrasLabel(e);
+  return shares.map((share) => {
+    const person = e.people.find((p) => p.id === share.personId)!;
+    const isOrganizer = person.id === e.organizerId;
+    const link =
+      !isOrganizer && share.totalCents > 0 && e.organizerVenmo
+        ? buildVenmoLink({ handle: e.organizerVenmo, amountCents: share.totalCents, note: e.title })
+        : undefined;
+    const message = isOrganizer
+      ? undefined
+      : buildShareMessage({
+          eventTitle: e.title,
+          organizerName: organizer.name,
+          share,
+          ...(link ? { link: link.webUrl } : {}),
+          ...(e.organizerVenmo ? { organizerHandle: e.organizerVenmo } : {}),
+          extrasLabel: label,
+        });
+    return { share, person, isOrganizer, ...(link ? { link } : {}), ...(message ? { message } : {}) };
+  });
+}
+
+function messagesJson(friends: readonly ShareRow[]) {
+  return friends.map((r) => ({
+    person_id: r.person.id,
+    name: r.person.name,
+    ...contactJson(r.person),
+    amount_cents: r.share.totalCents,
+    amount: formatCents(r.share.totalCents),
+    message: r.message,
+    ...(r.person.optedOut ? { do_not_text: true } : {}),
+  }));
 }
 
 function shareJson(event: DinnerEvent, s: PersonShare) {
@@ -498,11 +577,21 @@ function shareJson(event: DinnerEvent, s: PersonShare) {
 
 // ---------- The service ----------
 
+export interface ServiceOptions {
+  /** IANA zone for placing the day-of reminder (no earlier than 9am local). */
+  timeZone?: string;
+}
+
 export class FoSquadService {
+  private readonly timeZone: string;
+
   constructor(
     private readonly store: EventStore,
     private readonly clock: () => Date = () => new Date(),
-  ) {}
+    opts: ServiceOptions = {},
+  ) {
+    this.timeZone = opts.timeZone ?? DEFAULT_TIME_ZONE;
+  }
 
   private nowIso(): string {
     return this.clock().toISOString();
@@ -516,7 +605,7 @@ export class FoSquadService {
 
   /** Every success result carries the same envelope, with next_action from getStatus. */
   private ok(event: DinnerEvent, extra: ToolResult = {}, lead?: string): ToolResult {
-    const status = getStatus(event, this.clock());
+    const status = getStatus(event, this.clock(), this.timeZone);
     return {
       ok: true,
       event_id: event.id,
@@ -831,7 +920,7 @@ export class FoSquadService {
         plus_ones: p.plusOnes,
         ...(p.budgetCents !== undefined ? { budget: formatCents(p.budgetCents), budget_is_private: true } : {}),
       },
-      pending: getStatus(event, this.clock()).pending.map((x) => x.name),
+      pending: getStatus(event, this.clock(), this.timeZone).pending.map((x) => x.name),
       ...(event.shiftCheck && !event.chosenSlotId
         ? { waiting_on_shift: namesOf(event, shiftWaiting(event, this.nowIso())) }
         : {}),
@@ -868,7 +957,7 @@ export class FoSquadService {
       );
     }
     const friendsAnswered = timePrefs(peek).filter((p) => p.personId !== peek.organizerId);
-    const pending = getStatus(peek, nowIso).pending;
+    const pending = getStatus(peek, nowIso, this.timeZone).pending;
     if (pending.length > 0 && !args.force && !isLateReply(peek.replyDeadline, nowIso)) {
       return this.ok(peek, {
         decided: false,
@@ -893,7 +982,8 @@ export class FoSquadService {
     const { event, data } = await this.mutate<Decision>(args.event_id, (e) => {
       assertStage(e, ["planning"], "pick a time");
       const invited = e.people.filter((p) => !p.optedOut);
-      const prio = priorityIds(concessions, invited);
+      // The organizer decides anyway, so fairness priority is only ever for friends.
+      const prio = priorityIds(concessions, invited, e.id).filter((id) => id !== e.organizerId);
       const names = nameMap(e);
       const prefs = withOrganizer(e, timePrefs(e), nowIso);
       const time = pickTime({
@@ -1113,7 +1203,7 @@ export class FoSquadService {
     });
 
     const slot = slotLabel(event, event.chosenSlotId);
-    const ballot = event.restaurantOptions.map((o) => `${o.id}) ${o.name}`).join(" ");
+    const ballot = event.restaurantOptions.map((o) => `${o.id}) ${o.name}${ballotTag(o, event.organizerCovered === true)}`).join(" ");
     return this.ok(event, {
       options: event.restaurantOptions.map((o) => ({
         id: o.id,
@@ -1188,7 +1278,7 @@ export class FoSquadService {
     const { event, data } = await this.mutate(args.event_id, (e) => {
       assertStage(e, ["voting"], "tally votes");
       const voterPeople = voters(e);
-      const prio = priorityIds(concessions, voterPeople);
+      const prio = priorityIds(concessions, voterPeople, e.id).filter((id) => id !== e.organizerId);
       const tally = tallyVotes({
         options: e.restaurantOptions,
         votes: e.votes,
@@ -1278,6 +1368,10 @@ export class FoSquadService {
         ...(b.notes ? { notes: b.notes } : {}),
       },
       announcement: `Booked! ${b.restaurantName}, ${label}. See you there.`,
+      timers: {
+        day_of_reminder_at: dayOfReminderAt(new Date(b.startsAt), this.timeZone).toISOString(),
+        bill_question_at: billQuestionAt(new Date(b.startsAt)).toISOString(),
+      },
     });
   }
 
@@ -1285,7 +1379,11 @@ export class FoSquadService {
 
   async addReceipt(args: AddReceiptArgs): Promise<ToolResult> {
     const { event, data } = await this.mutate(args.event_id, (e, nowIso) => {
+      // Only this dinner's organizer can add its receipt, so a photo can't land on someone else's dinner.
+      assertOrganizer(e, senderOf(args), "add a receipt");
       assertStage(e, ["planning", "voting", "booked", "claiming"], "add a receipt");
+      // A receipt before the table time is for some other meal (or the wrong dinner).
+      if (e.stage === "booked") assertMealHappened(e, nowIso, "add a receipt");
       const fromStage = e.stage;
       const first = nextItemNumber(e.receipts);
       const items: LineItem[] = args.items.map((item, i) => ({
@@ -1430,10 +1528,17 @@ export class FoSquadService {
         ref = parsed.name;
         items = parsed.items;
       } else if (args.person !== undefined && args.items !== undefined) {
+        // An empty list would silently wipe what they claimed (seen in the sandbox after a retry).
+        if (args.items.length === 0) throw invalid(`If ${args.person} had nothing, send claim "${args.person}: none". Otherwise list their items.`);
         ref = args.person;
         items = args.items.map((i) => ({ number: i.number, weight: i.weight ?? 1 }));
       } else {
-        throw invalid('Send either claim ("Maya: 1, 4") or person plus items.');
+        // Seen live: Fo sent person plus a plural "claims" string, which the schema drops.
+        throw invalid(
+          args.person !== undefined
+            ? `Got person "${args.person}" but no items. Add items ([{ "number": 3 }]), or send only claim (singular): "Name: 3".`
+            : 'Send either claim ("Maya: 1, 4") or person plus items.',
+        );
       }
       const person = requirePerson(e, ref);
       if (!e.attendeeIds) throw invalid("Confirm who came with set_attendees before recording claims.");
@@ -1464,7 +1569,9 @@ export class FoSquadService {
       let next = e;
       // A changed claim after totals went out is a dispute: back to claiming to recalculate.
       if (claimsChanged && next.stage === "paying") next = transition(next, "claiming", nowIso);
-      return { event: next, data: { person, mine } };
+      // Items this save took away from them: record_claims replaces a person's whole list.
+      const dropped = before.filter((b) => !mine.some((m) => m.itemNumber === b.itemNumber));
+      return { event: next, data: { person, mine, dropped } };
     });
 
     const allItems = event.receipts.flatMap((r) => r.items);
@@ -1480,6 +1587,16 @@ export class FoSquadService {
         `${name} claimed all ${allItems.length} items. Before calculating, check with ${name}: did they share everything, or have it all to themselves? ` +
           `Any item someone else also claims is split with ${name}.` +
           (analysis.pendingAttendeeIds.length ? ` ${joinNames(namesOf(event, analysis.pendingAttendeeIds))} still need to claim their own items.` : ""),
+      );
+    }
+    if (data.dropped.length) {
+      const list = data.dropped.map((c) => `${c.itemNumber}) ${byNumber.get(c.itemNumber)?.description ?? "item"}`).join(", ");
+      const merged = [...data.mine, ...data.dropped]
+        .sort((a, b) => a.itemNumber - b.itemNumber)
+        .map((c) => `${c.itemNumber}${c.weight > 1 ? `x${c.weight}` : ""}`)
+        .join(", ");
+      warnings.push(
+        `This replaced ${data.person.name}'s earlier claims and removed ${list}. If this was an addition (they still had ${data.dropped.length > 1 ? "those" : "it"}), save their full list: claim "${data.person.name}: ${merged}".`,
       );
     }
     return this.ok(event, {
@@ -1535,42 +1652,7 @@ export class FoSquadService {
       const split = computeSplit(buildSplitInput(e));
       if (!split.ok) throw invalid(splitErrorMessage(e, split.error));
 
-      const organizer = getOrganizer(e)!;
-      const label = extrasLabel(e);
-      const rows = split.shares.map((share) => {
-        const person = e.people.find((p) => p.id === share.personId)!;
-        const isOrganizer = person.id === e.organizerId;
-        const link =
-          !isOrganizer && share.totalCents > 0 && e.organizerVenmo
-            ? buildVenmoLink({ handle: e.organizerVenmo, amountCents: share.totalCents, note: e.title })
-            : undefined;
-        const message = isOrganizer
-          ? undefined
-          : buildShareMessage({
-              eventTitle: e.title,
-              organizerName: organizer.name,
-              share,
-              ...(link ? { link: link.webUrl } : {}),
-              ...(e.organizerVenmo ? { organizerHandle: e.organizerVenmo } : {}),
-              extrasLabel: label,
-            });
-        return { share, person, isOrganizer, link, message };
-      });
-
-      // Payments for everyone but the organizer. An unchanged amount keeps its
-      // status; a changed one (after a dispute) starts over at pending.
-      const payments: Payment[] = rows
-        .filter((r) => !r.isOrganizer)
-        .map((r) => {
-          const prev = e.payments.find((p) => p.personId === r.person.id);
-          const venmo = r.link ? { venmoUrl: r.link.webUrl } : {};
-          if (prev && prev.amountCents === r.share.totalCents) {
-            const { venmoUrl: _old, ...rest } = prev;
-            return { ...rest, ...venmo };
-          }
-          return { personId: r.person.id, amountCents: r.share.totalCents, status: "pending", ...venmo, updatedAt: nowIso };
-        });
-      e.payments = payments;
+      const rows = shareRows(e, split.shares);
       e.shares = split.shares;
       return { event: transition(e, "paying", nowIso), data: { rows, totalCents: split.totalCents } };
     });
@@ -1592,90 +1674,63 @@ export class FoSquadService {
         ...(r.isOrganizer ? { is_organizer: true } : {}),
         ...(r.link ? { venmo_url: r.link.webUrl, venmo_app_url: r.link.appUrl } : {}),
       })),
-      messages: friends.map((r) => ({
-        person_id: r.person.id,
-        name: r.person.name,
-        ...contactJson(r.person),
-        amount_cents: r.share.totalCents,
-        amount: formatCents(r.share.totalCents),
-        message: r.message,
-        ...(r.person.optedOut ? { do_not_text: true } : {}),
-      })),
-    }, "Show the organizer the summary and send nothing until they say yes. Then send each person their own message.");
+      messages: messagesJson(friends),
+    }, "Show the organizer the summary and send nothing until they say yes. On their yes, call send_totals (by_phone or by_email = the organizer's), then send each person their own message.");
+  }
+
+  // ----- send_totals -----
+
+  async sendTotals(args: SendTotalsArgs): Promise<ToolResult> {
+    const { event } = await this.mutate(args.event_id, (e, nowIso) => {
+      if (e.stage === "settled" && e.totalsSentAt) return { event: e, data: undefined };
+      assertOrganizer(e, senderOf(args), "send the totals");
+      assertStage(e, ["paying"], "send the totals");
+      return { event: { ...transition(e, "settled", nowIso), totalsSentAt: nowIso }, data: undefined };
+    });
+    const friends = shareRows(event, event.shares ?? []).filter((r) => !r.isOrganizer);
+    return this.ok(
+      event,
+      {
+        // Fo Squad never sends anything itself. Saying "sent" here once led Fo to report
+        // totals as delivered when no email had gone out.
+        delivered: false,
+        messages: messagesJson(friends),
+        tell_organizer_after_sending: `Sent: everyone has their total and your Venmo link. ${event.title} is all wrapped up.`,
+      },
+      "Nothing has been sent yet: Fo Squad doesn't send messages. Send each person their own message now, word for word, skipping anyone marked do_not_text. Only after they've actually gone out, tell the organizer tell_organizer_after_sending.",
+    );
   }
 
   // ----- cover_bill -----
 
   async coverBill(args: CoverBillArgs): Promise<ToolResult> {
-    const { event } = await this.mutate(args.event_id, (e, nowIso) => {
-      if (e.stage === "settled" && e.organizerCovered) return { event: e, data: undefined };
+    const { event, data } = await this.mutate(args.event_id, (e, nowIso) => {
+      if (e.organizerCovered && (e.stage === "settled" || !mealHappened(e, nowIso))) return { event: e, data: { early: e.stage !== "settled" } };
       assertOrganizer(e, senderOf(args), "cover the bill");
-      if (e.stage === "paying") {
+      if (e.stage === "settled") {
         throw new FoError(
           "WRONG_STAGE",
-          `Totals for "${e.title}" already went out. To let everyone off, confirm each person with mark_paid (from the organizer) and tell them it's covered.`,
+          `Totals for "${e.title}" already went out with Venmo links. Tell each friend it's covered; there's nothing to undo here.`,
         );
       }
-      assertStage(e, ["booked", "claiming"], "cover the bill");
-      // Asked after the dinner, so the day-of reminder still goes out.
-      if (e.stage === "booked" && e.booking && Date.parse(nowIso) < Date.parse(e.booking.startsAt)) {
-        throw invalid(`"${e.title}" hasn't happened yet. Ask about the bill after the dinner.`);
+      // Said up front (a birthday treat): note it and keep going, so the day-of reminder still goes out.
+      if (!mealHappened(e, nowIso) && ["planning", "voting", "booked"].includes(e.stage)) {
+        return { event: { ...e, organizerCovered: true, updatedAt: nowIso }, data: { early: true } };
       }
-      return { event: { ...transition(e, "settled", nowIso), organizerCovered: true }, data: undefined };
+      assertStage(e, ["booked", "claiming", "paying"], "cover the bill");
+      return { event: { ...transition(e, "settled", nowIso), organizerCovered: true }, data: { early: false } };
     });
     return this.ok(
       event,
       {
         covered: true,
-        tell_organizer: `Done: ${event.title} is on you, so nobody gets a payment request. Thanks for treating everyone!`,
+        settled: event.stage === "settled",
+        tell_organizer: data.early
+          ? `Got it: ${event.title} is your treat. Nobody will be asked for money, and I'll close it out after.`
+          : `Done: ${event.title} is on you, so nobody gets a payment request. Thanks for treating everyone!`,
       },
       "Don't message friends about money.",
     );
-  }
-
-  // ----- mark_paid -----
-
-  async markPaid(args: MarkPaidArgs): Promise<ToolResult> {
-    const { event, data } = await this.mutate(args.event_id, (e, nowIso) => {
-      assertStage(e, ["paying", "settled"], "mark someone paid");
-      const person = requirePerson(e, args.person);
-      const payment = e.payments.find((p) => p.personId === person.id);
-      if (!payment) {
-        throw invalid(
-          person.id === e.organizerId
-            ? `${person.name} paid the restaurant, so there's nothing to mark.`
-            : `${person.name} doesn't owe anything for "${e.title}".`,
-        );
-      }
-      const by = senderOf(args);
-      const fromOrganizer = isOrganizerContact(e, by);
-      const fromSelf = hasContact(person, by);
-      if (!fromOrganizer && !fromSelf) assertOrganizer(e, by, `mark ${person.name} paid`);
-
-      // A text is never proof: only the organizer's word makes it "paid", and a
-      // friend's "Paid!" never downgrades an organizer-confirmed payment.
-      const status = fromOrganizer ? "paid" : payment.status === "paid" ? "paid" : "says_paid";
-      let next = e;
-      if (status !== payment.status) {
-        next.payments = next.payments.map((p) => (p.personId === person.id ? { ...p, status, updatedAt: nowIso } : p));
-      }
-      const allPaid = next.payments.every((p) => p.amountCents <= 0 || p.status === "paid");
-      if (allPaid && next.stage === "paying") next = transition(next, "settled", nowIso);
-      return { event: next, data: { person, status, amount: payment.amountCents } };
-    });
-
-    const stillOwing = event.payments.filter((p) => p.amountCents > 0 && p.status !== "paid");
-    return this.ok(event, {
-      person: { id: data.person.id, name: data.person.name },
-      status: data.status,
-      amount_cents: data.amount,
-      amount: formatCents(data.amount),
-      settled: event.stage === "settled",
-      still_owing: stillOwing.map((p) => ({ name: nameOf(event, p.personId), amount: formatCents(p.amountCents), status: p.status })),
-      ...(data.status === "says_paid"
-        ? { ask_organizer: `${data.person.name} says they paid ${formatCents(data.amount)}. Can you confirm?` }
-        : {}),
-    });
   }
 
   // ----- record_opt_out -----
@@ -1711,8 +1766,10 @@ export class FoSquadService {
           "No active dinner for this number or email. If the organizer wants to plan one, call create_event; if they sent a receipt, ask who was there and create_event (no time slots) before add_receipt.",
       };
     }
-    const status = getStatus(event, this.clock());
+    const status = getStatus(event, this.clock(), this.timeZone);
     const caller = contact ? resolvePerson(event, contact) : undefined;
+    // Same person in several open dinners: say so, so a reply or receipt isn't pinned on the wrong one.
+    const others = contact && !args.event_id ? await this.otherOpenDinners(contact, event.id) : [];
     return {
       ok: true,
       found: true,
@@ -1733,7 +1790,19 @@ export class FoSquadService {
         return { ...p, ...(person ? contactJson(person) : {}) };
       }),
       details: status.details,
-      next_action: status.nextAction,
+      ...(others.length ? { other_open_dinners: others } : {}),
+      next_action: others.length
+        ? `${status.nextAction} This contact is also in ${others.length} other open dinner${others.length > 1 ? "s" : ""} (other_open_dinners): make sure this message is about "${event.title}", and pass event_id from now on.`
+        : status.nextAction,
     };
+  }
+
+  private async otherOpenDinners(contact: string, exceptId: string) {
+    const normalized = tryNormalizeContact(contact);
+    if (!normalized) return [];
+    return (await this.store.list())
+      .filter((e) => e.id !== exceptId && e.stage !== "settled" && e.people.some((p) => contactsOf(p).includes(normalized)))
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+      .map((e) => ({ event_id: e.id, title: e.title, stage: e.stage, updated_at: e.updatedAt }));
   }
 }

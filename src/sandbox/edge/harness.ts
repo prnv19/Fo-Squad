@@ -98,7 +98,7 @@ export async function runEdgeCase(c: EdgeCase, opts: RunEdgeCaseOptions): Promis
   let seedMs = scenario.start.getTime();
   let clock: SimClock | undefined;
   const store = new MemoryStore();
-  const service = new FoSquadService(store, () => (clock ? clock.now() : new Date(seedMs)));
+  const service = new FoSquadService(store, () => (clock ? clock.now() : new Date(seedMs)), { timeZone: tz });
 
   bus.emit({
     type: "run_started",
